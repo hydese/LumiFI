@@ -1,23 +1,29 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-//! LumiFi: a small, light music player. This is the mini player.
+//! LumiFi: a small, light music player. A square mini player, and a full library window one
+//! shortcut away (⌘L / Ctrl+L).
 
 mod actions;
 mod assets;
+mod library;
+mod library_window;
 mod mini_player;
 mod platform;
+mod playback;
 mod queue;
+mod settings;
 mod theme;
+mod widgets;
+mod windows;
 
 use std::path::PathBuf;
 
-use gpui::{
-    App, Application, Bounds, Menu, MenuItem, TitlebarOptions, WindowBackgroundAppearance,
-    WindowBounds, WindowKind, WindowOptions, prelude::*, px, size,
-};
+use gpui::{App, Application, Menu, MenuItem};
 
 use crate::actions::*;
-use crate::mini_player::{MiniPlayer, SIZE};
+use crate::library::Library;
+use crate::playback::Playback;
+use crate::settings::{Settings, SettingsModel};
 
 /// `file:///Users/leo/Music/a%20b.flac` → `/Users/leo/Music/a b.flac`.
 fn file_url_to_path(url: &str) -> Option<PathBuf> {
@@ -47,14 +53,29 @@ fn main() {
 
     let app = Application::new().with_assets(assets::Assets);
     // macOS "Open with LumiFi" and double-clicked files arrive as file:// URLs, possibly before
-    // the window exists; the mini player picks them up on its next tick.
+    // the window exists; playback picks them up on its next tick.
     app.on_open_urls(|urls| {
         let paths = urls.iter().filter_map(|u| file_url_to_path(u)).collect();
-        mini_player::queue_opened_paths(paths);
+        playback::queue_opened_paths(paths);
     });
     app.run(move |cx: &mut App| {
+        let settings = Settings::load();
+        Playback::install(settings.volume, cx);
+        Library::install(settings.folders.clone(), cx);
+        SettingsModel::install(settings, cx);
+
         actions::bind_keys(cx);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        actions::register_global(cx);
+        // Deferred: the action arrives while a window is being updated, and that window can only be
+        // read and closed once the update is over.
+        cx.on_action(|_: &ToggleLibrary, cx| cx.defer(windows::toggle_library));
+        // Closing the last window (the library's close button) quits, like any music app.
+        cx.on_window_closed(|cx| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
         cx.set_menus(vec![
             Menu {
                 name: "LumiFi".into(),
@@ -84,37 +105,17 @@ fn main() {
             },
             Menu {
                 name: "Vista".into(),
-                items: vec![MenuItem::action("Cambia visualizzazione (A/B)", CycleView)],
+                items: vec![
+                    MenuItem::action("Libreria / Mini player", ToggleLibrary),
+                    MenuItem::action("Sempre in primo piano", ToggleOnTop),
+                ],
             },
         ]);
 
-        let bounds = Bounds::centered(None, size(px(SIZE), px(SIZE)), cx);
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("LumiFi".into()),
-                        appears_transparent: true,
-                        traffic_light_position: Some(gpui::point(px(-100.), px(-100.))),
-                    }),
-                    kind: WindowKind::Normal,
-                    is_resizable: false,
-                    is_minimizable: true,
-                    window_background: if cfg!(target_os = "linux") {
-                        WindowBackgroundAppearance::Opaque
-                    } else {
-                        WindowBackgroundAppearance::Transparent
-                    },
-                    window_decorations: Some(gpui::WindowDecorations::Client),
-                    app_id: Some("lumifi".into()),
-                    ..Default::default()
-                },
-                |window, cx| cx.new(|cx| MiniPlayer::new(files.clone(), window, cx)),
-            )
-            .expect("could not open the LumiFi window");
-
-        let _ = window;
+        windows::open_mini(cx);
+        if !files.is_empty() {
+            playback::playback(cx).update(cx, |p, cx| p.open_paths(files.clone(), cx));
+        }
         cx.activate(true);
     });
 }

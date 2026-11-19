@@ -98,13 +98,34 @@ impl Queue {
     }
 
     /// Replaces the queue and starts from its first track.
+    #[cfg(test)]
     pub fn replace(&mut self, tracks: Vec<PathBuf>) {
+        self.replace_at(tracks, 0);
+    }
+
+    /// Replaces the queue and starts from `start` (an index into `tracks`). With shuffle on,
+    /// that track plays first and the others follow in random order.
+    pub fn replace_at(&mut self, tracks: Vec<PathBuf>, start: usize) {
         self.tracks = tracks;
+        let start = start.min(self.tracks.len().saturating_sub(1));
         self.order = (0..self.tracks.len()).collect();
-        self.position = 0;
-        if self.shuffle {
+        self.position = start;
+        if self.shuffle && !self.tracks.is_empty() {
+            self.order.swap(0, start);
+            self.position = 0;
             self.shuffle_after(0);
         }
+    }
+
+    /// The tracks in play order, and which one is playing.
+    #[cfg(test)]
+    pub fn upcoming(&self) -> (Vec<&Path>, usize) {
+        let list = self
+            .order
+            .iter()
+            .map(|&i| self.tracks[i].as_path())
+            .collect();
+        (list, self.position)
     }
 
     pub fn current(&self) -> Option<&Path> {
@@ -246,6 +267,20 @@ mod tests {
         seen.dedup();
         assert_eq!(seen.len(), 19);
         q.set_shuffle(false);
+    }
+
+    #[test]
+    fn replace_at_starts_from_the_chosen_track() {
+        let mut q = Queue::new(3);
+        q.replace_at(tracks(5), 3);
+        assert_eq!(q.current(), Some(Path::new("03.flac")));
+        assert_eq!(q.skip_forward(), Some(Path::new("04.flac")));
+        q.set_shuffle(true);
+        q.replace_at(tracks(5), 2);
+        assert_eq!(q.current(), Some(Path::new("02.flac")));
+        let (order, position) = q.upcoming();
+        assert_eq!(position, 0);
+        assert_eq!(order.len(), 5);
     }
 
     #[test]

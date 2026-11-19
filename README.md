@@ -27,7 +27,7 @@ La tua musica, come è stata registrata.
 - 🔌 **Servizi a scelta.** Spotify, Apple Music e gli altri si attivano dalle impostazioni; se
   non li accendi, non li vedi.
 
-## Provare il mini player
+## Provare LumiFi
 
 Scarica `LumiFi.app` (macOS) o `LumiFi.exe` (Windows) dalla pagina
 [Releases](https://github.com/hydese/LumiFI/releases), oppure compilalo (serve
@@ -50,11 +50,23 @@ cargo run --release -p lumifi -- ~/Music/Album     # parte subito con una cartel
 | ↑ / ↓ e rotella | Volume |
 | M | Silenzia |
 | S / R | Casuale / ripeti (tutto, un brano) |
-| V | Vista A (barra) o B (forma d'onda) |
+| V | Mini player: vista A (barra) o B (forma d'onda), anche dalle Impostazioni |
+| ⌘L / Ctrl+L | Passa dal mini player all'app completa e ritorno |
 | ⌘O / Ctrl+O | Apri file o cartelle |
 
-La finestra si sposta trascinandola dalla parte alta. I comandi compaiono quando ci passi sopra
-con il mouse.
+Il mini player si sposta trascinandolo dalla parte alta; i comandi compaiono quando ci passi
+sopra con il mouse. Il pulsante in alto a destra apre l'**app completa**: album, artisti, brani
+e impostazioni, con la barra di riproduzione in basso. La musica non si ferma quando cambi
+finestra.
+
+La libreria legge la cartella Musica del sistema; altre cartelle si aggiungono dalle
+Impostazioni. LumiFi tiene le sue cose in:
+
+| | Windows | macOS |
+| --- | --- | --- |
+| Impostazioni | `%APPDATA%\LumiFi\settings.json` | `~/Library/Application Support/LumiFi/` |
+| Libreria | `%LOCALAPPDATA%\LumiFi\library.db` | `~/Library/Application Support/LumiFi/` |
+| Copertine | `%LOCALAPPDATA%\LumiFi\covers` | `~/Library/Caches/LumiFi/covers` |
 
 ### Il motore da riga di comando
 
@@ -77,9 +89,9 @@ cargo run --release -p lumifi-cli -- devices
 ## Roadmap
 
 1. **v0.1 — Fondamenta:** motore, CI e release per macOS e Windows.
-2. **v0.2 — Mini player:** musica locale, coda, viste A/B. *(ora)*
+2. **v0.2 — Mini player:** musica locale, coda, viste A/B.
 3. **v0.3 — Libreria e interfaccia:** app completa, scansione delle cartelle, album e artisti,
-   playlist, testi sincronizzati.
+   impostazioni *(ora)*; poi playlist, ricerca, testi sincronizzati.
 4. **v0.6 — Qualità ed EQ:** modalità esclusiva, gapless, ReplayGain, equalizzatore e AutoEq.
 5. **v1.0 — Servizi:** Spotify, telecomando di Music.app, Last.fm, aggiornamenti automatici.
 

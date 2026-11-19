@@ -20,6 +20,13 @@ pub struct Theme {
     pub chip: Rgba,
     pub accent: Rgba,
     pub on_accent: Rgba,
+    /// Library window: the sidebar and the player bar.
+    pub sidebar: Rgba,
+    /// Cards, inputs and buttons that are not the accent.
+    pub surface: Rgba,
+    pub border: Rgba,
+    /// Rows and items under the mouse or selected.
+    pub hover: Rgba,
 }
 
 impl Theme {
@@ -41,6 +48,10 @@ impl Theme {
             chip: rgba(0x080809a8),
             accent: rgb(ACCENT),
             on_accent: rgb(ON_ACCENT),
+            sidebar: rgb(0x080809),
+            surface: rgb(0x1a1a1d),
+            border: rgba(0xffffff14),
+            hover: rgba(0xffffff0f),
         }
     }
 
@@ -55,6 +66,10 @@ impl Theme {
             chip: rgba(0x080809a8),
             accent: rgb(ACCENT),
             on_accent: rgb(ON_ACCENT),
+            sidebar: rgb(0xeeedea),
+            surface: rgb(0xffffff),
+            border: rgba(0x0000001a),
+            hover: rgba(0x0000000b),
         }
     }
 }

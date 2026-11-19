@@ -15,6 +15,11 @@ log.workspace = true
 env_logger.workspace = true
 anyhow.workspace = true
 raw-window-handle = "0.6"
+dirs = "5.0.1"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2.7"
@@ -24,3 +29,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Wind
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+hound.workspace = true
