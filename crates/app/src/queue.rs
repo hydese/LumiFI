@@ -156,7 +156,6 @@ impl Queue {
     }
 
     /// The tracks in play order, and which one is playing.
-    #[cfg(test)]
     pub fn upcoming(&self) -> (Vec<&Path>, usize) {
         let list = self
             .order
@@ -164,6 +163,72 @@ impl Queue {
             .map(|&i| self.tracks[i].as_path())
             .collect();
         (list, self.position)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    /// Jumps to the track at `position` in play order.
+    pub fn jump_to(&mut self, position: usize) -> Option<&Path> {
+        if position < self.order.len() {
+            self.position = position;
+        }
+        self.current()
+    }
+
+    /// Takes the track at `position` (in play order) out of the queue. The playing track
+    /// cannot be removed.
+    pub fn remove_at(&mut self, position: usize) -> bool {
+        if position >= self.order.len() || position == self.position {
+            return false;
+        }
+        let index = self.order.remove(position);
+        self.tracks.remove(index);
+        for i in &mut self.order {
+            if *i > index {
+                *i -= 1;
+            }
+        }
+        if position < self.position {
+            self.position -= 1;
+        }
+        true
+    }
+
+    /// Moves the track at `from` to `to` (both in play order); the same track keeps playing.
+    pub fn move_item(&mut self, from: usize, to: usize) {
+        let n = self.order.len();
+        if from >= n || to >= n || from == to {
+            return;
+        }
+        let current = self.order[self.position];
+        let item = self.order.remove(from);
+        self.order.insert(to, item);
+        if let Some(p) = self.order.iter().position(|&i| i == current) {
+            self.position = p;
+        }
+    }
+
+    /// Puts `paths` right after the playing track.
+    pub fn insert_next(&mut self, paths: Vec<PathBuf>) {
+        let at = if self.order.is_empty() {
+            0
+        } else {
+            self.position + 1
+        };
+        for (k, path) in paths.into_iter().enumerate() {
+            self.tracks.push(path);
+            self.order.insert(at + k, self.tracks.len() - 1);
+        }
+    }
+
+    /// Adds `paths` at the end of the queue.
+    pub fn append(&mut self, paths: Vec<PathBuf>) {
+        for path in paths {
+            self.tracks.push(path);
+            self.order.push(self.tracks.len() - 1);
+        }
     }
 
     pub fn current(&self) -> Option<&Path> {
@@ -319,6 +384,25 @@ mod tests {
         let (order, position) = q.upcoming();
         assert_eq!(position, 0);
         assert_eq!(order.len(), 5);
+    }
+
+    #[test]
+    fn edits_keep_the_playing_track() {
+        let mut q = Queue::new(5);
+        q.replace_at(tracks(5), 2);
+        q.insert_next(vec![PathBuf::from("x.flac")]);
+        let (order, pos) = q.upcoming();
+        assert_eq!(order[pos + 1], Path::new("x.flac"));
+        assert!(!q.remove_at(pos), "the playing track stays");
+        assert!(q.remove_at(0));
+        assert_eq!(q.current(), Some(Path::new("02.flac")));
+        q.move_item(q.upcoming().1, 0);
+        assert_eq!(q.current(), Some(Path::new("02.flac")));
+        assert_eq!(q.upcoming().1, 0);
+        q.append(vec![PathBuf::from("y.flac")]);
+        let (order, _) = q.upcoming();
+        assert_eq!(order.last(), Some(&Path::new("y.flac")));
+        assert_eq!(q.jump_to(2), Some(Path::new("x.flac")));
     }
 
     #[test]

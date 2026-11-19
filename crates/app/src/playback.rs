@@ -29,6 +29,9 @@ pub struct NowPlaying {
     pub path: PathBuf,
     pub title: SharedString,
     pub artist: Option<SharedString>,
+    pub album: Option<SharedString>,
+    /// Lyrics written in the file's tags, if any.
+    pub lyrics: Option<String>,
     /// "Artist · Album", or the folder name when the file has no tags.
     pub subtitle: SharedString,
     pub cover: Option<Arc<Image>>,
@@ -280,6 +283,55 @@ impl Playback {
         }
     }
 
+    // The queue -------------------------------------------------------------------------
+
+    /// The queue in play order, and the position of the playing track in it.
+    pub fn upcoming(&self) -> (Vec<PathBuf>, usize) {
+        let (list, position) = self.queue.upcoming();
+        (list.into_iter().map(Path::to_path_buf).collect(), position)
+    }
+
+    pub fn play_queue_position(&mut self, position: usize, cx: &mut Context<Self>) {
+        if let Some(path) = self.queue.jump_to(position).map(Path::to_path_buf) {
+            self.load(&path, Duration::ZERO, true, cx);
+        }
+    }
+
+    pub fn remove_from_queue(&mut self, position: usize, cx: &mut Context<Self>) {
+        if self.queue.remove_at(position) {
+            self.save_session();
+            cx.notify();
+        }
+    }
+
+    pub fn move_in_queue(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        self.queue.move_item(from, to);
+        self.save_session();
+        cx.notify();
+    }
+
+    /// "Riproduci dopo": right after the playing track (or now, if nothing is loaded).
+    pub fn play_next(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if self.queue.is_empty() {
+            self.play_list(paths, 0, cx);
+            return;
+        }
+        self.queue.insert_next(paths);
+        self.save_session();
+        cx.notify();
+    }
+
+    /// "Aggiungi alla coda": at the end.
+    pub fn add_to_queue(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if self.queue.is_empty() {
+            self.play_list(paths, 0, cx);
+            return;
+        }
+        self.queue.append(paths);
+        self.save_session();
+        cx.notify();
+    }
+
     // Sessions ----------------------------------------------------------------------------
 
     /// Saves the queue and position, so the next launch can resume. Cheap: a small JSON file.
@@ -451,6 +503,8 @@ fn describe(path: &Path, player: &Player) -> NowPlaying {
         path: path.to_path_buf(),
         title: title.into(),
         artist: tags.artist.clone().map(Into::into),
+        album: tags.album.clone().map(Into::into),
+        lyrics: tags.lyrics.clone(),
         subtitle: subtitle.into(),
         cover: player.artwork().and_then(cover_image),
         duration: player.info().duration(),

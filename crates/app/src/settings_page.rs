@@ -1,5 +1,5 @@
-//! The settings window, as in the approved design (and like LumiPDF): sections on the left,
-//! grouped rows on the right. Things that do not exist yet are shown with an "In arrivo" label
+//! The settings, as in the approved design (and like LumiPDF), shown as a page of the library
+//! window: sections on the left, grouped rows on the right. Things that do not exist yet are shown with an "In arrivo" label
 //! and do nothing, instead of pretending to work.
 
 use gpui::{
@@ -13,6 +13,7 @@ use crate::library::{Library, library};
 use crate::playback::playback;
 use crate::settings::{MiniStyle, MiniView, Settings, SettingsModel, StartWith, settings};
 use crate::theme::{Theme, ThemeMode};
+use crate::updates::{UpdateState, updates};
 use crate::widgets::{badge, icon, logo, radio, segment, segments, switch};
 
 const REPOSITORY: &str = "https://github.com/hydese/LumiFI";
@@ -34,11 +35,11 @@ pub enum Section {
 impl Section {
     const ALL: [Section; 7] = [
         Section::General,
+        Section::Appearance,
         Section::Audio,
         Section::Library,
         Section::Equalizer,
         Section::Services,
-        Section::Appearance,
         Section::About,
     ];
 
@@ -55,7 +56,12 @@ impl Section {
     }
 }
 
-pub struct SettingsWindow {
+/// Asks the library window to leave the settings.
+pub struct BackToLibrary;
+
+impl gpui::EventEmitter<BackToLibrary> for SettingsPage {}
+
+pub struct SettingsPage {
     section: Section,
     settings: Entity<SettingsModel>,
     library: Entity<Library>,
@@ -64,7 +70,7 @@ pub struct SettingsWindow {
     _subscriptions: Vec<gpui::Subscription>,
 }
 
-impl SettingsWindow {
+impl SettingsPage {
     pub fn new(section: Section, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = settings(cx);
         let library = library(cx);
@@ -143,9 +149,17 @@ impl SettingsWindow {
     }
 }
 
-impl Render for SettingsWindow {
+impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_page(window, cx)
+    }
+}
+
+impl SettingsPage {
+    /// The page as an element, for the library window to place directly in its layout.
+    pub fn render_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(window, cx);
+        let content_width = (f32::from(window.viewport_size().width) - 220.0).clamp(400.0, 760.0);
         let value = self.settings.read(cx).value.clone();
         let page = match self.section {
             Section::General => self.general(&value, &theme, cx),
@@ -161,7 +175,6 @@ impl Render for SettingsWindow {
             .flex()
             .bg(theme.ground)
             .text_color(theme.text)
-            .font_family(".SystemUIFont")
             .text_size(px(13.))
             .child(self.nav(&theme, cx))
             .child(
@@ -173,16 +186,19 @@ impl Render for SettingsWindow {
                     .overflow_y_scroll()
                     .child(
                         div()
+                            // An explicit width: inside a scroll area a "max width" alone
+                            // lets the rows shrink to their text.
+                            .w(px(content_width))
                             .px(px(32.))
-                            .pt(px(if cfg!(target_os = "macos") { 34. } else { 26. }))
+                            .pt(px(26.))
                             .pb(px(32.))
-                            .max_w(px(760.))
                             .flex()
                             .flex_col()
                             .gap(px(18.))
                             .child(page),
                     ),
             )
+            .into_any_element()
     }
 }
 
@@ -198,6 +214,7 @@ fn title(text: &'static str) -> impl IntoElement {
 /// A labelled group of rows.
 fn group(label: &'static str, theme: &Theme, rows: Vec<AnyElement>) -> AnyElement {
     let mut frame = div()
+        .w_full()
         .rounded(px(10.))
         .border_1()
         .border_color(theme.hairline)
@@ -207,11 +224,13 @@ fn group(label: &'static str, theme: &Theme, rows: Vec<AnyElement>) -> AnyElemen
     for (i, row) in rows.into_iter().enumerate() {
         frame = frame.child(
             div()
+                .w_full()
                 .when(i > 0, |d| d.border_t_1().border_color(theme.hairline))
                 .child(row),
         );
     }
     div()
+        .w_full()
         .flex()
         .flex_col()
         .gap(px(8.))
@@ -236,11 +255,13 @@ fn row(
     theme: &Theme,
 ) -> gpui::Div {
     div()
+        .w_full()
         .px(px(14.))
         .py(px(10.))
         .min_h(px(44.))
         .flex()
         .items_center()
+        .justify_between()
         .gap(px(16.))
         .child(
             div()
@@ -260,7 +281,7 @@ fn row(
                     )
                 }),
         )
-        .child(control)
+        .child(div().flex_none().child(control))
 }
 
 fn outline_button(
@@ -285,20 +306,37 @@ fn outline_button(
         .child(label)
 }
 
-impl SettingsWindow {
+impl SettingsPage {
     fn nav(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .w(px(220.))
             .h_full()
             .flex_none()
             .px(px(10.))
-            .pt(px(if cfg!(target_os = "macos") { 52. } else { 18. }))
+            .pt(px(16.))
             .bg(theme.sidebar)
             .border_r_1()
             .border_color(theme.hairline)
             .flex()
             .flex_col()
             .gap(px(2.))
+            .child(
+                div()
+                    .id("settings-back")
+                    .h(px(32.))
+                    .px(px(10.))
+                    .mb(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(7.))
+                    .text_color(theme.muted)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme.hover))
+                    .child(icon("back", 15., theme.muted))
+                    .child("Libreria")
+                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(BackToLibrary))),
+            )
             .children(Section::ALL.iter().map(|&section| {
                 let active = section == self.section;
                 div()
@@ -328,6 +366,34 @@ impl SettingsWindow {
         let version = format!("LumiFi {}", env!("CARGO_PKG_VERSION"));
         let start = value.start_with;
         let resume = value.resume;
+        let check_updates = value.check_updates;
+        let beta = value.beta;
+        let update_state = updates(cx).read(cx).state.clone();
+        let update_status: SharedString = match &update_state {
+            UpdateState::Idle => "Non ancora controllato".into(),
+            UpdateState::Checking => "Controllo in corso…".into(),
+            UpdateState::UpToDate { checked_at } => {
+                format!("Hai l'ultima versione · controllato {checked_at}").into()
+            }
+            UpdateState::Available(release) => {
+                format!("È disponibile LumiFi {}", release.version).into()
+            }
+            UpdateState::Failed => "Non riesco a raggiungere GitHub. Riprova più tardi.".into(),
+        };
+        let update_button = if matches!(update_state, UpdateState::Available(_)) {
+            outline_button("update-now", "Aggiorna", theme)
+                .bg(theme.accent)
+                .text_color(theme.on_accent)
+                .font_weight(FontWeight::SEMIBOLD)
+                .on_click(|_, _, cx| updates(cx).update(cx, |u, cx| u.set_dialog(true, cx)))
+        } else {
+            outline_button("check-now", "Cerca ora", theme).on_click(cx.listener(
+                |this, _: &ClickEvent, _, cx| {
+                    let beta = this.settings.read(cx).value.beta;
+                    updates(cx).update(cx, |u, cx| u.check(beta, cx));
+                },
+            ))
+        };
         let install_card = |name: &'static str, hint: &'static str, selected: bool| {
             div()
                 .flex_1()
@@ -352,6 +418,7 @@ impl SettingsWindow {
                 )
         };
         div()
+            .w_full()
             .flex()
             .flex_col()
             .gap(px(18.))
@@ -378,25 +445,32 @@ impl SettingsWindow {
                                     div()
                                         .text_size(px(12.))
                                         .text_color(theme.muted)
-                                        .child("Le nuove versioni per ora si scaricano da GitHub."),
+                                        .child(update_status),
                                 ),
                         )
-                        .child(
-                            outline_button("releases", "Apri le release", theme)
-                                .on_click(|_, _, cx| cx.open_url(RELEASES)),
-                        )
+                        .child(update_button)
                         .into_any_element(),
                     row(
                         "Cerca aggiornamenti all'avvio",
                         Some("Controlla le release su GitHub ogni volta che apri LumiFi."),
-                        badge("In arrivo", theme),
+                        switch(check_updates, theme).id("check-updates").on_click(cx.listener(
+                            |this, _: &ClickEvent, _, cx| {
+                                this.change(cx, |v| v.check_updates = !v.check_updates)
+                            },
+                        )),
                         theme,
                     )
                     .into_any_element(),
                     row(
                         "Versioni beta",
-                        Some("Ricevi le novità prima degli altri. Possono avere qualche difetto."),
-                        badge("In arrivo", theme),
+                        Some("Ricevi le novità prima degli altri. Possono avere qualche difetto; torni alla versione stabile quando vuoi."),
+                        switch(beta, theme).id("beta").on_click(cx.listener(
+                            |this, _: &ClickEvent, _, cx| {
+                                this.change(cx, |v| v.beta = !v.beta);
+                                let beta = this.settings.read(cx).value.beta;
+                                updates(cx).update(cx, |u, cx| u.check(beta, cx));
+                            },
+                        )),
                         theme,
                     )
                     .into_any_element(),
@@ -548,6 +622,7 @@ impl SettingsWindow {
         let show_quality = value.show_quality;
 
         div()
+            .w_full()
             .flex()
             .flex_col()
             .gap(px(18.))
@@ -684,6 +759,7 @@ impl SettingsWindow {
             ),
         };
         div()
+            .w_full()
             .flex()
             .flex_col()
             .gap(px(18.))
@@ -757,7 +833,7 @@ impl SettingsWindow {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(mini_preview(s, theme)),
+                            .child(mini_preview(s, view, theme)),
                     )
                     .child(
                         div()
@@ -772,6 +848,7 @@ impl SettingsWindow {
                     }))
             };
         div()
+            .w_full()
             .flex()
             .flex_col()
             .gap(px(18.))
@@ -838,19 +915,12 @@ impl SettingsWindow {
                     .into_any_element(),
                     row(
                         "Sempre in primo piano",
-                        Some("Il mini player resta sopra le altre finestre. Anche con la puntina sul player o il tasto T."),
+                        Some("Il mini player resta sopra le altre finestre. Anche con la puntina sul player o il tasto T. La dimensione si sceglie col tasto destro sul mini player."),
                         switch(on_top, theme).id("on-top").on_click(cx.listener(
                             |this, _: &ClickEvent, _, cx| {
                                 this.change(cx, |v| v.always_on_top = !v.always_on_top)
                             },
                         )),
-                        theme,
-                    )
-                    .into_any_element(),
-                    row(
-                        "Dimensione",
-                        Some("Trascina il bordo del mini player per ingrandirlo o rimpicciolirlo: le proporzioni restano quelle giuste."),
-                        div(),
                         theme,
                     )
                     .into_any_element(),
@@ -860,34 +930,50 @@ impl SettingsWindow {
     }
 }
 
-/// A tiny drawing of each mini player shape, for the choice in Aspetto.
-fn mini_preview(style: MiniStyle, theme: &Theme) -> AnyElement {
-    let cover = div().bg(theme.accent).child(
+/// A tiny drawing of each mini player shape, for the choice in Aspetto. It follows the A/B
+/// choice, and shows the square at rest (only the title and the bar).
+fn mini_preview(style: MiniStyle, view: MiniView, theme: &Theme) -> AnyElement {
+    let logo_box = |size: f32| {
         div()
             .size_full()
+            .bg(theme.accent)
             .flex()
             .items_center()
             .justify_center()
-            .child(icon("waves", 22., theme.on_accent)),
-    );
-    let bars = |n: usize, h: f32| {
-        div()
+            .child(icon("waves", size, theme.on_accent))
+    };
+    let progress = |bars: usize, h: f32| match view {
+        MiniView::A => div().h(px(h)).flex().items_center().child(
+            div()
+                .w_full()
+                .h(px(3.))
+                .rounded(px(1.5))
+                .bg(theme.track)
+                .child(
+                    div()
+                        .h_full()
+                        .w(gpui::relative(0.4))
+                        .rounded(px(1.5))
+                        .bg(theme.text),
+                ),
+        ),
+        MiniView::B => div()
+            .h(px(h))
             .flex()
             .items_center()
             .gap(px(1.5))
-            .h(px(h))
-            .children((0..n).map(move |i| {
-                let peak = 0.25 + 0.75 * ((i as f32 * 0.41).sin() * (i as f32 * 0.13).cos()).abs();
+            .children((0..bars).map(move |i| {
+                let peak = 0.3 + 0.7 * ((i as f32 * 0.6).sin() * (i as f32 * 0.21).cos()).abs();
                 div()
                     .flex_1()
                     .h(px(2.0 + peak * (h - 2.0)))
                     .rounded(px(1.))
-                    .bg(if i < n * 2 / 5 {
+                    .bg(if i < bars * 2 / 5 {
                         theme.accent
                     } else {
                         theme.unplayed
                     })
-            }))
+            })),
     };
     match style {
         MiniStyle::Strip => div()
@@ -900,7 +986,7 @@ fn mini_preview(style: MiniStyle, theme: &Theme) -> AnyElement {
             .border_color(theme.hairline)
             .flex()
             .items_center()
-            .child(cover.size(px(36.)))
+            .child(div().size(px(36.)).flex_none().child(logo_box(26.)))
             .child(
                 div()
                     .flex_1()
@@ -909,7 +995,7 @@ fn mini_preview(style: MiniStyle, theme: &Theme) -> AnyElement {
                     .flex_col()
                     .gap(px(3.))
                     .child(div().h(px(4.)).w(px(46.)).rounded(px(2.)).bg(theme.muted))
-                    .child(bars(22, 7.)),
+                    .child(progress(13, 9.)),
             )
             .child(
                 div()
@@ -924,28 +1010,30 @@ fn mini_preview(style: MiniStyle, theme: &Theme) -> AnyElement {
             .rounded(px(8.))
             .overflow_hidden()
             .relative()
-            .child(cover.absolute().inset_0())
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(70.))
+                    .child(logo_box(44.)),
+            )
             .child(
                 div()
                     .absolute()
                     .left_0()
                     .right_0()
                     .bottom_0()
-                    .h(px(52.))
+                    .h(px(30.))
                     .px(px(7.))
                     .bg(theme.scrim)
                     .flex()
                     .flex_col()
                     .justify_center()
-                    .gap(px(5.))
+                    .gap(px(4.))
                     .child(div().h(px(4.)).w(px(40.)).rounded(px(2.)).bg(theme.muted))
-                    .child(bars(18, 8.))
-                    .child(
-                        div()
-                            .flex()
-                            .justify_center()
-                            .child(div().size(px(12.)).rounded_full().bg(theme.accent)),
-                    ),
+                    .child(progress(16, 7.)),
             )
             .into_any_element(),
     }
@@ -953,6 +1041,7 @@ fn mini_preview(style: MiniStyle, theme: &Theme) -> AnyElement {
 
 fn equalizer(theme: &Theme) -> AnyElement {
     div()
+        .w_full()
         .flex()
         .flex_col()
         .gap(px(18.))
@@ -987,10 +1076,10 @@ fn services(theme: &Theme) -> AnyElement {
             "Last.fm",
             "Registra ogni brano che ascolti sul tuo profilo.",
         ),
-        ("ListenBrainz", "Come Last.fm, ma open source."),
         ("YouTube Music", "Allo studio."),
     ];
     div()
+        .w_full()
         .flex()
         .flex_col()
         .gap(px(18.))
@@ -1050,7 +1139,7 @@ fn services(theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-fn about(theme: &Theme, cx: &mut Context<SettingsWindow>) -> AnyElement {
+fn about(theme: &Theme, cx: &mut Context<SettingsPage>) -> AnyElement {
     let version = format!("LumiFi {}", env!("CARGO_PKG_VERSION"));
     let link = |id: &'static str, label: &'static str, url: &'static str| {
         div()
@@ -1063,6 +1152,7 @@ fn about(theme: &Theme, cx: &mut Context<SettingsWindow>) -> AnyElement {
     };
     let _ = cx;
     div()
+        .w_full()
         .flex()
         .flex_col()
         .gap(px(18.))

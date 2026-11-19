@@ -34,7 +34,7 @@ Scarica `LumiFi.app` (macOS) o `LumiFi.exe` (Windows) dalla pagina
 [Rust](https://rustup.rs)):
 
 ```sh
-cargo run --release -p lumifi                      # finestra vuota: trascinaci la musica
+cargo run --release -p lumifi                      # si apre sulla libreria
 cargo run --release -p lumifi -- ~/Music/Album     # parte subito con una cartella o dei file
 ```
 
@@ -54,18 +54,27 @@ cargo run --release -p lumifi -- ~/Music/Album     # parte subito con una cartel
 | T | Mini player sempre in primo piano |
 | ⌘L / Ctrl+L | Libreria ⇄ mini player |
 | ⌘, / Ctrl+, | Impostazioni |
+| ⌘F / Ctrl+F | Cerca brani, album e artisti (Invio suona il primo, Esc chiude) |
 | ⌘O / Ctrl+O | Apri file o cartelle |
 
-LumiFi si apre sulla **libreria**: album, artisti e brani, con la barra di riproduzione in
-basso. Il pulsante **Mini player** in alto (o Ctrl+L) la sostituisce con il mini player, a
-**striscia** o **quadrato** (si sceglie in Impostazioni › Aspetto). Il mini player si sposta
-trascinandolo da un punto libero, si ridimensiona dal bordo mantenendo le proporzioni, e la
-puntina lo tiene sopra le altre finestre. La musica non si ferma quando cambi finestra, e
-all'avvio LumiFi riprende dall'ultimo brano, in pausa.
+LumiFi si apre sulla **libreria**: album, artisti, brani e playlist, con la ricerca in alto e
+la barra di riproduzione in basso. Un clic su un brano lo suona, un altro clic lo mette in
+pausa; il tasto destro su brani e album li aggiunge alla coda o a una playlist. Il cuore li
+mette nei Preferiti. In basso a destra si aprono la **coda** e **In riproduzione**, con i
+**testi sincronizzati** (da un file .lrc accanto al brano, dai tag, oppure da
+[LRCLIB](https://lrclib.net)).
 
-Un clic sul logo LumiFi (o sull'ingranaggio) apre le **Impostazioni**: Generale, Audio (anche
-la scelta dell'uscita), Libreria, Equalizzatore, Servizi, Aspetto, Informazioni. Quello che non
-c'è ancora è segnato "In arrivo".
+Il pulsante **Mini player** in alto (o Ctrl+L) la sostituisce con il mini player, a
+**striscia** o **quadrato**. Il mini player si sposta trascinandolo da un punto libero; con il
+**tasto destro** si sceglie la dimensione (75–200%), la posizione (libera o agganciata in alto
+o in basso), la forma e "sempre in primo piano". La musica non si ferma quando cambi finestra,
+e all'avvio LumiFi riprende dall'ultimo brano, in pausa.
+
+Un clic sul logo LumiFi (o sull'ingranaggio) apre le **Impostazioni**: Generale, Aspetto,
+Audio (anche la scelta dell'uscita), Libreria, Equalizzatore, Servizi, Informazioni. Quello che
+non c'è ancora è segnato "In arrivo". All'avvio LumiFi controlla se su GitHub c'è una versione
+nuova e, se sì, mostra il pulsante **Aggiorna**. Le playlist sono file .m3u8 nella cartella dei
+dati di LumiFi, apribili anche da altri player.
 
 La libreria legge la cartella Musica del sistema; altre cartelle si aggiungono dalle
 Impostazioni. LumiFi tiene le sue cose in:

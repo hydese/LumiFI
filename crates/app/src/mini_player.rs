@@ -1,29 +1,33 @@
 //! The mini player, in the two shapes of the approved design: a strip (480×72) and a square
-//! (280×280). Both are resizable with their proportions locked, and both always show their
-//! controls. It only draws: the music lives in [`Playback`], shared with the library window.
+//! (280×280). Sizes come from the right-click menu (75–200%), never from dragging the border,
+//! so the system cannot snap or stretch it. It only draws: the music lives in [`Playback`].
 
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Entity, ExternalPaths, FocusHandle, FontWeight, InteractiveElement,
-    IntoElement, MouseButton, MouseDownEvent, ObjectFit, ParentElement, Pixels, Rems, Render, Rgba,
-    ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement, Styled, StyledImage, Task,
-    Window, div, img, prelude::*, px, rems, size, svg,
+    Animation, AnimationExt, AnyElement, App, Bounds, Context, Entity, ExternalPaths, FocusHandle,
+    FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
+    ParentElement, Pixels, Point, Rems, Render, Rgba, ScrollWheelEvent, SharedString, Size,
+    StatefulInteractiveElement, Styled, StyledImage, Task, Window, div, img, point, prelude::*, px,
+    rems, size, svg,
 };
 use lumifi_engine::format_time;
 
 use crate::actions::*;
+use crate::mini_menu;
 use crate::platform;
 use crate::playback::{Playback, WAVE_BARS, playback};
 use crate::queue::Repeat;
-use crate::settings::{MiniStyle, MiniView, SettingsModel, settings};
+use crate::settings::{Dock, MiniStyle, MiniView, Settings, SettingsModel, settings};
 use crate::theme::Theme;
 use crate::widgets::{SlideEvent, slider};
 
-/// Bars in the strip's waveform.
-const STRIP_BARS: usize = 40;
+/// Bars in the strip's waveform: fewer and wider than in the square.
+const STRIP_BARS: usize = 26;
+/// Height of the square's extra controls (times, buttons, volume) when they are up.
+const SQUARE_EXTRA: f32 = 102.0;
 
-/// The design's size of each shape, in points at scale 1.
+/// The design's size of each shape, in points at 100%.
 pub fn base_size(style: MiniStyle) -> (f32, f32) {
     match style {
         MiniStyle::Strip => (480.0, 72.0),
@@ -31,19 +35,27 @@ pub fn base_size(style: MiniStyle) -> (f32, f32) {
     }
 }
 
-/// How far each shape can be shrunk or grown.
-pub fn scale_range(style: MiniStyle) -> (f32, f32) {
-    match style {
-        MiniStyle::Strip => (0.8, 1.7),
-        MiniStyle::Square => (0.8, 2.2),
-    }
-}
-
 pub fn window_size(style: MiniStyle, scale: f32) -> Size<Pixels> {
     let (w, h) = base_size(style);
-    let (min, max) = scale_range(style);
-    let scale = scale.clamp(min, max);
+    let scale = scale.clamp(0.5, 3.0);
     size(px((w * scale).round()), px((h * scale).round()))
+}
+
+/// Where a docked mini player goes inside `area` (the screen minus taskbar and menu bar).
+pub fn docked_origin(
+    area: Bounds<Pixels>,
+    window: Size<Pixels>,
+    dock: Dock,
+) -> Option<Point<Pixels>> {
+    let x = area.origin.x + (area.size.width - window.width) / 2.0;
+    match dock {
+        Dock::Free => None,
+        Dock::Top => Some(point(x, area.origin.y + px(8.))),
+        Dock::Bottom => Some(point(
+            x,
+            area.origin.y + area.size.height - window.height - px(8.),
+        )),
+    }
 }
 
 /// A length in the design's points. Every size in the mini player goes through here, and the
@@ -60,6 +72,24 @@ fn icon(name: &str, points: f32, color: Rgba) -> gpui::Svg {
         .text_color(color)
 }
 
+/// The strip's waveform: the analysed peaks averaged into fewer bars, never too flat.
+pub fn strip_peaks(waveform: &[f32], bars: usize) -> Vec<f32> {
+    (0..bars)
+        .map(|i| {
+            if waveform.is_empty() {
+                return 0.35;
+            }
+            let from = i * waveform.len() / bars;
+            let to = ((i + 1) * waveform.len() / bars)
+                .max(from + 1)
+                .min(waveform.len());
+            let slice = &waveform[from..to];
+            let mean = slice.iter().sum::<f32>() / slice.len() as f32;
+            0.25 + 0.75 * mean.clamp(0.0, 1.0)
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Drag {
     None,
@@ -74,8 +104,14 @@ pub struct MiniPlayer {
     settings: Entity<SettingsModel>,
     style: MiniStyle,
     scale: f32,
+    dock: Dock,
     drag: Drag,
-    _save_scale: Option<Task<()>>,
+    /// The mouse is over the window (the square raises its controls).
+    hovered: bool,
+    /// The square's controls are up; `epoch` restarts the animation at each change.
+    expanded: bool,
+    epoch: usize,
+    _hide: Option<Task<()>>,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -92,63 +128,110 @@ impl MiniPlayer {
             cx.observe(&playback, |_, _, cx| cx.notify()),
             cx.observe_in(&settings, window, |this, settings, window, cx| {
                 let value = settings.read(cx).value.clone();
-                platform::keep_on_top(window, value.always_on_top);
-                if value.mini_style != this.style {
-                    this.style = value.mini_style;
-                    let target = window_size(this.style, this.scale);
-                    cx.defer_in(window, move |_, window, _| window.resize(target));
-                }
+                this.apply(&value, window, cx);
                 cx.notify();
             }),
-            cx.observe_window_bounds(window, |this, window, cx| this.keep_proportions(window, cx)),
+            cx.observe_window_bounds(window, |this, window, cx| {
+                this.leave_dock_if_moved(window, cx)
+            }),
         ];
-        let (min, max) = scale_range(value.mini_style);
+        let paused = playback.read(cx).is_paused();
+        if value.mini_dock != Dock::Free {
+            cx.defer_in(window, |this: &mut Self, window, cx| this.place(window, cx));
+        }
         Self {
             focus,
             playback,
             settings,
             style: value.mini_style,
-            scale: value.mini_scale.clamp(min, max),
+            scale: value.mini_scale,
+            dock: value.mini_dock,
             drag: Drag::None,
-            _save_scale: None,
+            hovered: false,
+            expanded: paused,
+            epoch: 0,
+            _hide: None,
             _subscriptions: subscriptions,
         }
     }
 
-    /// After the user resizes the window: follow the side they dragged and fix the other, so the
-    /// shape keeps its proportions.
-    fn keep_proportions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (base_w, base_h) = base_size(self.style);
-        let (min, max) = scale_range(self.style);
-        let current = window.bounds().size;
-        let (w, h) = (f32::from(current.width), f32::from(current.height));
-        let by_width = w / base_w;
-        let by_height = h / base_h;
-        let scale = if (by_width - self.scale).abs() >= (by_height - self.scale).abs() {
-            by_width
-        } else {
-            by_height
+    /// Follows a change in the settings: shape, size, dock, always on top.
+    fn apply(&mut self, value: &Settings, window: &mut Window, cx: &mut Context<Self>) {
+        platform::keep_on_top(window, value.always_on_top);
+        let resized =
+            value.mini_style != self.style || (value.mini_scale - self.scale).abs() > 0.001;
+        let redocked = value.mini_dock != self.dock;
+        self.style = value.mini_style;
+        self.scale = value.mini_scale;
+        self.dock = value.mini_dock;
+        if resized {
+            let target = window_size(self.style, self.scale);
+            cx.defer_in(window, move |this, window, cx| {
+                window.resize(target);
+                this.place(window, cx);
+            });
+        } else if redocked {
+            cx.defer_in(window, |this, window, cx| this.place(window, cx));
         }
-        .clamp(min, max);
-        let target = window_size(self.style, scale);
-        if (f32::from(target.width) - w).abs() > 1.5 || (f32::from(target.height) - h).abs() > 1.5 {
-            // Not from inside the resize callback: the platform is still busy with that one.
-            cx.defer_in(window, move |_, window, _| window.resize(target));
+    }
+
+    /// Moves the window to its dock, if it has one.
+    fn place(&self, window: &mut Window, cx: &App) {
+        let size = window_size(self.style, self.scale);
+        let area = platform::work_area(window).or_else(|| window.display(cx).map(|d| d.bounds()));
+        if let Some(area) = area
+            && let Some(origin) = docked_origin(area, size, self.dock)
+        {
+            platform::move_to(window, origin);
         }
-        if (scale - self.scale).abs() > 0.004 {
-            self.scale = scale;
+    }
+
+    /// Dragging a docked player away frees it.
+    fn leave_dock_if_moved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dock == Dock::Free {
+            return;
+        }
+        let Some(area) = platform::work_area(window) else {
+            return;
+        };
+        let bounds = window.bounds();
+        if let Some(origin) = docked_origin(area, bounds.size, self.dock) {
+            let dx = (f32::from(bounds.origin.x) - f32::from(origin.x)).abs();
+            let dy = (f32::from(bounds.origin.y) - f32::from(origin.y)).abs();
+            if dx > 24.0 || dy > 24.0 {
+                self.dock = Dock::Free;
+                self.settings
+                    .update(cx, |s, cx| s.update(cx, |v| v.mini_dock = Dock::Free));
+            }
+        }
+    }
+
+    fn set_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        self.hovered = hovered;
+        if hovered {
+            self._hide = None;
+            self.set_expanded(true, cx);
+            return;
+        }
+        // A moment before lowering, so brushing the edge does not make it jump.
+        self._hide = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let paused = this.playback.read(cx).is_paused();
+                if !this.hovered && !paused {
+                    this.set_expanded(false, cx);
+                }
+            });
+        }));
+    }
+
+    fn set_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
+        if self.expanded != expanded {
+            self.expanded = expanded;
+            self.epoch += 1;
             cx.notify();
-            // Remember the size, once the user has stopped dragging.
-            self._save_scale = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(600))
-                    .await;
-                let _ = this.update(cx, |this, cx| {
-                    let scale = this.scale;
-                    this.settings
-                        .update(cx, |s, cx| s.update(cx, |v| v.mini_scale = scale));
-                });
-            }));
         }
     }
 
@@ -191,6 +274,12 @@ impl MiniPlayer {
         }
         cx.notify();
     }
+
+    fn open_menu(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let at = window.bounds().origin + event.position;
+        let area = platform::work_area(window).or_else(|| window.display(cx).map(|d| d.bounds()));
+        cx.defer(move |cx| mini_menu::open(at, area, cx));
+    }
 }
 
 impl Render for MiniPlayer {
@@ -198,6 +287,11 @@ impl Render for MiniPlayer {
         // The rem carries the scale: every length below is in design points through `u`.
         window.set_rem_size(px(16.0 * self.scale));
         let theme = Theme::current(window, cx);
+        // Paused, the square keeps its controls up.
+        if self.playback.read(cx).is_paused() && !self.expanded {
+            self.expanded = true;
+            self.epoch += 1;
+        }
         let content = match self.style {
             MiniStyle::Strip => self.render_strip(&theme, cx),
             MiniStyle::Square => self.render_square(&theme, cx),
@@ -223,6 +317,7 @@ impl Render for MiniPlayer {
             })
             .text_color(theme.text)
             .font_family(".SystemUIFont")
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| this.set_hovered(*hovered, cx)))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
                 let dy = f32::from(event.delta.pixel_delta(window.line_height()).y);
                 this.playback
@@ -233,6 +328,7 @@ impl Render for MiniPlayer {
                 let paths = paths.paths().to_vec();
                 this.playback.update(cx, |p, cx| p.open_paths(paths, cx));
             }))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::open_menu))
             // Behind everything: pressing on any empty spot moves the window. Buttons and sliders
             // sit above it and keep their clicks.
             .child(div().id("drag-layer").absolute().inset_0().on_mouse_down(
@@ -262,7 +358,7 @@ fn button(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .block_mouse_except_scroll()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(child)
         .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
 }
@@ -390,21 +486,31 @@ impl MiniPlayer {
             MiniView::B => {
                 let waveform = self.playback.read(cx).waveform();
                 let played = (progress * bars as f32) as usize;
+                let strip = bars == STRIP_BARS;
+                let peaks: Vec<f32> = if strip {
+                    strip_peaks(waveform, bars)
+                } else {
+                    (0..bars)
+                        .map(|i| {
+                            if waveform.is_empty() {
+                                0.15
+                            } else {
+                                waveform[i * WAVE_BARS / bars]
+                            }
+                        })
+                        .collect()
+                };
                 div()
                     .h(u(height))
                     .flex()
                     .items_center()
-                    .gap(u(if bars > 48 { 2. } else { 1.5 }))
-                    .children((0..bars).map(|i| {
-                        let peak = if waveform.is_empty() {
-                            0.15
-                        } else {
-                            waveform[i * WAVE_BARS / bars]
-                        };
+                    .gap(u(if strip { 2.5 } else { 2. }))
+                    .children(peaks.into_iter().enumerate().map(|(i, peak)| {
+                        let min = if strip { 4. } else { 3. };
                         div()
                             .flex_1()
-                            .h(u(3.0 + peak * (height - 3.0)))
-                            .rounded(u(1.))
+                            .h(u(min + peak * (height - min)))
+                            .rounded(u(if strip { 2. } else { 1. }))
                             .bg(if i < played {
                                 theme.accent
                             } else {
@@ -469,7 +575,7 @@ impl MiniPlayer {
                     .pr(u(10.))
                     .flex()
                     .flex_col()
-                    .gap(u(5.))
+                    .gap(u(3.))
                     .child(
                         div()
                             .flex()
@@ -494,7 +600,7 @@ impl MiniPlayer {
                                     .child(artist),
                             ),
                     )
-                    .child(self.progress_view(STRIP_BARS, 14., theme, cx)),
+                    .child(self.progress_view(STRIP_BARS, 22., theme, cx)),
             )
             .child(
                 div()
@@ -522,12 +628,19 @@ impl MiniPlayer {
                     .child(self.mute_button(14., theme, cx))
                     .child(
                         div()
-                            .w(u(56.))
-                            .mr(u(6.))
+                            .w(u(50.))
+                            .mr(u(4.))
                             .ml(u(2.))
                             .child(self.volume_slider(theme, cx)),
                     )
                     .child(self.pin_button(theme, theme.muted, cx))
+                    .child(button(
+                        "settings",
+                        26.,
+                        44.,
+                        icon("settings", 14., theme.muted),
+                        OpenSettings,
+                    ))
                     .child(button(
                         "library",
                         28.,
@@ -561,37 +674,119 @@ impl MiniPlayer {
         let volume = (playback.effective_volume() * 100.0).round() as u32;
         let chip = gpui::rgba(0x080809a8);
         let white = gpui::rgb(0xffffff);
+        let expanded = self.expanded;
+
+        // Times, controls and volume: they rise with the mouse and sink a moment after it leaves.
+        let extra = div()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .gap(u(7.))
+            .child(self.times(theme, cx))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(button(
+                        "shuffle",
+                        30.,
+                        32.,
+                        icon("shuffle", 15., shuffle),
+                        ToggleShuffle,
+                    ))
+                    .child(button(
+                        "previous",
+                        34.,
+                        36.,
+                        icon("previous", 19., theme.text),
+                        Previous,
+                    ))
+                    .child(self.play_button(42., 17., theme, cx))
+                    .child(button(
+                        "next",
+                        34.,
+                        36.,
+                        icon("next", 19., theme.text),
+                        Next,
+                    ))
+                    .child(button(
+                        "repeat",
+                        30.,
+                        32.,
+                        icon(repeat_icon, 15., repeat_color),
+                        CycleRepeat,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(u(8.))
+                    .text_color(theme.muted)
+                    .child(self.mute_button(14., theme, cx))
+                    .child(div().flex_1().child(self.volume_slider(theme, cx)))
+                    .child(
+                        div()
+                            .w(u(22.))
+                            .flex()
+                            .justify_end()
+                            .text_size(u(10.5))
+                            .child(volume.to_string()),
+                    ),
+            )
+            .with_animation(
+                ("square-extra", self.epoch),
+                Animation::new(Duration::from_millis(200)).with_easing(gpui::ease_in_out),
+                move |el, t| {
+                    let t = if expanded { t } else { 1.0 - t };
+                    el.h(u(SQUARE_EXTRA * t)).opacity(t)
+                },
+            );
 
         div()
             .absolute()
             .inset_0()
             // The cover fills the window; it takes no clicks, so it moves the window too.
             .child(div().absolute().inset_0().child(self.cover(theme, cx)))
-            .child(
-                div()
-                    .absolute()
-                    .top(u(10.))
-                    .right(u(10.))
-                    .flex()
-                    .gap(u(6.))
-                    .child(
-                        div()
-                            .rounded(u(8.))
-                            .bg(chip)
-                            .child(self.pin_button(theme, white, cx)),
-                    )
-                    .child(
-                        button(
-                            "library",
-                            28.,
-                            28.,
-                            icon("expand", 14., white),
-                            ToggleLibrary,
+            .when(expanded, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(u(10.))
+                        .right(u(10.))
+                        .flex()
+                        .gap(u(6.))
+                        .child(
+                            div()
+                                .rounded(u(8.))
+                                .bg(chip)
+                                .child(self.pin_button(theme, white, cx)),
                         )
-                        .rounded(u(8.))
-                        .bg(chip),
-                    ),
-            )
+                        .child(
+                            button(
+                                "settings",
+                                28.,
+                                28.,
+                                icon("settings", 14., white),
+                                OpenSettings,
+                            )
+                            .rounded(u(8.))
+                            .bg(chip),
+                        )
+                        .child(
+                            button(
+                                "library",
+                                28.,
+                                28.,
+                                icon("expand", 14., white),
+                                ToggleLibrary,
+                            )
+                            .rounded(u(8.))
+                            .bg(chip),
+                        ),
+                )
+            })
             .child(
                 div()
                     .absolute()
@@ -600,7 +795,7 @@ impl MiniPlayer {
                     .bottom_0()
                     .pt(u(11.))
                     .px(u(14.))
-                    .pb(u(10.))
+                    .pb(u(12.))
                     .bg(theme.scrim)
                     .flex()
                     .flex_col()
@@ -625,66 +820,8 @@ impl MiniPlayer {
                                     .child(subtitle),
                             ),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(u(3.))
-                            .child(self.progress_view(WAVE_BARS, 22., theme, cx))
-                            .child(self.times(theme, cx)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(button(
-                                "shuffle",
-                                30.,
-                                32.,
-                                icon("shuffle", 15., shuffle),
-                                ToggleShuffle,
-                            ))
-                            .child(button(
-                                "previous",
-                                34.,
-                                36.,
-                                icon("previous", 19., theme.text),
-                                Previous,
-                            ))
-                            .child(self.play_button(42., 17., theme, cx))
-                            .child(button(
-                                "next",
-                                34.,
-                                36.,
-                                icon("next", 19., theme.text),
-                                Next,
-                            ))
-                            .child(button(
-                                "repeat",
-                                30.,
-                                32.,
-                                icon(repeat_icon, 15., repeat_color),
-                                CycleRepeat,
-                            )),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(u(8.))
-                            .text_color(theme.muted)
-                            .child(self.mute_button(14., theme, cx))
-                            .child(div().flex_1().child(self.volume_slider(theme, cx)))
-                            .child(
-                                div()
-                                    .w(u(22.))
-                                    .flex()
-                                    .justify_end()
-                                    .text_size(u(10.5))
-                                    .child(volume.to_string()),
-                            ),
-                    ),
+                    .child(self.progress_view(WAVE_BARS, 22., theme, cx))
+                    .child(extra),
             )
             .into_any_element()
     }
@@ -726,4 +863,32 @@ fn plain_track(fraction: f32, track: Rgba, fill: Rgba) -> impl IntoElement {
             .rounded(u(2.))
             .bg(fill),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_peaks_average_and_never_go_flat() {
+        let peaks = strip_peaks(&[0.0, 1.0, 0.0, 1.0], 2);
+        assert_eq!(peaks, vec![0.625, 0.625]);
+        assert!(strip_peaks(&[], 26).iter().all(|&p| p > 0.3));
+        assert_eq!(strip_peaks(&[0.5; 56], 26).len(), 26);
+    }
+
+    #[test]
+    fn docks_centre_on_the_work_area() {
+        let area = Bounds::new(point(px(0.), px(0.)), size(px(1920.), px(1040.)));
+        let window = size(px(480.), px(72.));
+        assert_eq!(
+            docked_origin(area, window, Dock::Top),
+            Some(point(px(720.), px(8.)))
+        );
+        assert_eq!(
+            docked_origin(area, window, Dock::Bottom),
+            Some(point(px(720.), px(960.)))
+        );
+        assert_eq!(docked_origin(area, window, Dock::Free), None);
+    }
 }

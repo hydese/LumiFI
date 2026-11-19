@@ -20,12 +20,14 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 rusqlite = { version = "0.43", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+unicode-segmentation = "1.13"
+ureq = { version = "3.5", features = ["json"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2.7"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [lints]
 workspace = true

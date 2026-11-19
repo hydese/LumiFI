@@ -7,13 +7,18 @@ mod actions;
 mod assets;
 mod library;
 mod library_window;
+mod lyrics;
+mod mini_menu;
 mod mini_player;
 mod platform;
 mod playback;
+mod playlists;
 mod queue;
 mod settings;
-mod settings_window;
+mod settings_page;
+mod text_input;
 mod theme;
+mod updates;
 mod widgets;
 mod windows;
 
@@ -65,16 +70,22 @@ fn main() {
         let resume = settings.resume;
         let volume = settings.volume;
         let folders = settings.folders.clone();
+        let (check_updates, beta) = (settings.check_updates, settings.beta);
         SettingsModel::install(settings, cx);
         let playback = Playback::install(volume, cx);
         Library::install(folders, cx);
+        playlists::Playlists::install(cx);
+        lyrics::LyricsModel::install(cx);
+        updates::Updates::install(check_updates, beta, cx);
 
         actions::bind_keys(cx);
+        text_input::bind_keys(cx);
         actions::register_global(cx);
         // Deferred: these actions arrive while a window is being updated, and windows can only
         // be opened, read and closed once that update is over.
         cx.on_action(|_: &ToggleLibrary, cx| cx.defer(windows::toggle_library));
         cx.on_action(|_: &OpenSettings, cx| cx.defer(|cx| windows::open_settings(None, cx)));
+        cx.on_action(|_: &FocusSearch, cx| cx.defer(windows::focus_search));
         // Closing the player (the library's close button) quits, like any music app; the
         // settings window alone does not keep LumiFi open.
         cx.on_window_closed(|cx| {
@@ -119,6 +130,7 @@ fn main() {
                 name: "Vista".into(),
                 items: vec![
                     MenuItem::action("Libreria / Mini player", ToggleLibrary),
+                    MenuItem::action("Cerca", FocusSearch),
                     MenuItem::action("Cambia avanzamento del mini player (A/B)", CycleView),
                     MenuItem::action("Sempre in primo piano", ToggleOnTop),
                 ],

@@ -56,6 +56,39 @@ pub struct LibraryData {
     pub albums: Vec<Album>,
     /// Sorted by name.
     pub artists: Vec<Artist>,
+    /// Where each file is in `tracks`.
+    pub by_path: HashMap<PathBuf, usize>,
+}
+
+/// What a search found, as indexes into the library.
+#[derive(Debug, Default, PartialEq)]
+pub struct SearchResults {
+    pub artists: Vec<usize>,
+    pub albums: Vec<usize>,
+    pub tracks: Vec<usize>,
+}
+
+impl SearchResults {
+    pub fn is_empty(&self) -> bool {
+        self.artists.is_empty() && self.albums.is_empty() && self.tracks.is_empty()
+    }
+}
+
+/// Lower case without accents, so "citta" finds "Città".
+fn fold(text: &str) -> String {
+    text.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'à' | 'á' | 'â' | 'ä' | 'ã' | 'å' => 'a',
+            'è' | 'é' | 'ê' | 'ë' => 'e',
+            'ì' | 'í' | 'î' | 'ï' => 'i',
+            'ò' | 'ó' | 'ô' | 'ö' | 'õ' => 'o',
+            'ù' | 'ú' | 'û' | 'ü' => 'u',
+            'ñ' => 'n',
+            'ç' => 'c',
+            c => c,
+        })
+        .collect()
 }
 
 const UNKNOWN_ARTIST: &str = "Artista sconosciuto";
@@ -201,7 +234,45 @@ impl LibraryData {
         let mut artists: Vec<_> = by_artist.into_iter().collect();
         artists.sort_by(|a, b| a.0.cmp(&b.0));
         data.artists = artists.into_iter().map(|(_, artist)| artist).collect();
+        data.by_path = data
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.path.clone(), i))
+            .collect();
         data
+    }
+
+    /// Every word of `query` must appear in the title, artist or album.
+    pub fn search(&self, query: &str) -> SearchResults {
+        let words: Vec<String> = fold(query).split_whitespace().map(str::to_owned).collect();
+        if words.is_empty() {
+            return SearchResults::default();
+        }
+        let matches = |haystack: &str| {
+            let haystack = fold(haystack);
+            words.iter().all(|w| haystack.contains(w.as_str()))
+        };
+        SearchResults {
+            artists: (0..self.artists.len())
+                .filter(|&i| matches(&self.artists[i].name))
+                .take(8)
+                .collect(),
+            albums: (0..self.albums.len())
+                .filter(|&i| {
+                    let a = &self.albums[i];
+                    matches(&format!("{} {}", a.title, a.artist))
+                })
+                .take(12)
+                .collect(),
+            tracks: (0..self.tracks.len())
+                .filter(|&i| {
+                    let t = &self.tracks[i];
+                    matches(&format!("{} {} {}", t.title, t.artist, t.album))
+                })
+                .take(100)
+                .collect(),
+        }
     }
 
     pub fn album_paths(&self, album: usize) -> Vec<PathBuf> {
@@ -335,6 +406,25 @@ mod tests {
             duration_ms: Some(60_000),
             cover: None,
         }
+    }
+
+    #[test]
+    fn search_matches_every_word_without_accents() {
+        let mut a = row("/m/a.flac", Some("Lucio Dalla"), Some("Città"), Some(1));
+        a.title = Some("Caruso".into());
+        let mut b = row("/m/b.flac", Some("Linkin Park"), Some("Meteora"), Some(1));
+        b.title = Some("Faint".into());
+        let data = LibraryData::build(vec![a, b]);
+        let found = data.search("dalla citta");
+        assert_eq!(found.tracks.len(), 1);
+        assert_eq!(found.albums.len(), 1);
+        assert!(data.search("faint park").artists.is_empty());
+        assert_eq!(data.search("faint park").tracks.len(), 1);
+        assert!(data.search("  ").is_empty());
+        assert_eq!(
+            data.by_path[std::path::Path::new("/m/b.flac")],
+            data.search("faint").tracks[0]
+        );
     }
 
     #[test]

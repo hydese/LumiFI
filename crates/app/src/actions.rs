@@ -24,6 +24,7 @@ actions!(
         ToggleOnTop,
         ToggleLibrary,
         OpenSettings,
+        FocusSearch,
         Quit,
     ]
 );
@@ -32,7 +33,8 @@ actions!(
 pub const PLAYER_CONTEXT: &str = "Player";
 
 pub fn bind_keys(cx: &mut App) {
-    let ctx = Some(PLAYER_CONTEXT);
+    // Not while typing in a text field: there, space and letters are text.
+    let ctx = Some("Player && !TextInput");
     cx.bind_keys([
         KeyBinding::new("space", TogglePlay, ctx),
         KeyBinding::new("right", Next, ctx),
@@ -47,6 +49,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("v", CycleView, ctx),
         KeyBinding::new("t", ToggleOnTop, ctx),
         KeyBinding::new("secondary-,", OpenSettings, None),
+        KeyBinding::new("secondary-f", FocusSearch, None),
         KeyBinding::new("secondary-l", ToggleLibrary, None),
         KeyBinding::new("secondary-o", Open, None),
         KeyBinding::new("secondary-q", Quit, None),

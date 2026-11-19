@@ -111,3 +111,188 @@ pub fn start_drag(window: &Window) {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     window.start_window_move();
 }
+
+/// Maximizes the window, or restores it if it already is (the title bar's middle button and
+/// double-click).
+pub fn toggle_maximize(window: &mut Window) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            IsZoomed, SW_MAXIMIZE, SW_RESTORE, ShowWindow,
+        };
+        if let Some(hwnd) = hwnd(window) {
+            // SAFETY: `hwnd` is this window's live handle.
+            unsafe {
+                let command = if IsZoomed(hwnd) != 0 {
+                    SW_RESTORE
+                } else {
+                    SW_MAXIMIZE
+                };
+                ShowWindow(hwnd, command);
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    window.titlebar_double_click();
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    window.zoom_window();
+}
+
+#[cfg(target_os = "windows")]
+fn hwnd(window: &Window) -> Option<windows_sys::Win32::Foundation::HWND> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = HasWindowHandle::window_handle(window).ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::Win32(win) => Some(win.hwnd.get() as windows_sys::Win32::Foundation::HWND),
+        _ => None,
+    }
+}
+
+/// The part of the window's screen not covered by the taskbar, menu bar or Dock, in the same
+/// coordinates gpui uses for windows. `None` where the system cannot tell.
+#[cfg(target_os = "windows")]
+pub fn work_area(window: &Window) -> Option<gpui::Bounds<gpui::Pixels>> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    };
+    let hwnd = hwnd(window)?;
+    let scale = window.scale_factor();
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: plain queries about this window's monitor into a correctly sized struct.
+    let ok = unsafe {
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        GetMonitorInfoW(monitor, &mut info)
+    };
+    if ok == 0 {
+        return None;
+    }
+    let r = info.rcWork;
+    Some(gpui::Bounds::new(
+        gpui::point(
+            gpui::px(r.left as f32 / scale),
+            gpui::px(r.top as f32 / scale),
+        ),
+        gpui::size(
+            gpui::px((r.right - r.left) as f32 / scale),
+            gpui::px((r.bottom - r.top) as f32 / scale),
+        ),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+pub fn work_area(window: &Window) -> Option<gpui::Bounds<gpui::Pixels>> {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+    let ns_window = ns_window(window)?;
+    // SAFETY: messages to this live window's screen and to the screen list; NSRect is returned
+    // by value.
+    let (visible, primary_frame) = unsafe {
+        let screen: *mut Object = msg_send![ns_window, screen];
+        if screen.is_null() {
+            return None;
+        }
+        let visible: NSRect = msg_send![screen, visibleFrame];
+        let screens: *mut Object = msg_send![class!(NSScreen), screens];
+        let primary: *mut Object = msg_send![screens, objectAtIndex: 0usize];
+        let primary_frame: NSRect = msg_send![primary, frame];
+        (visible, primary_frame)
+    };
+    // Cocoa counts from the bottom of the main screen; gpui from its top.
+    let top = primary_frame.h - (visible.y + visible.h);
+    Some(gpui::Bounds::new(
+        gpui::point(gpui::px(visible.x as f32), gpui::px(top as f32)),
+        gpui::size(gpui::px(visible.w as f32), gpui::px(visible.h as f32)),
+    ))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn work_area(_window: &Window) -> Option<gpui::Bounds<gpui::Pixels>> {
+    None
+}
+
+/// Moves the window so its top-left corner is at `origin` (gpui screen coordinates).
+#[cfg(target_os = "windows")]
+pub fn move_to(window: &Window, origin: gpui::Point<gpui::Pixels>) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+    };
+    let Some(hwnd) = hwnd(window) else {
+        return;
+    };
+    let scale = window.scale_factor();
+    let x = (f32::from(origin.x) * scale).round() as i32;
+    let y = (f32::from(origin.y) * scale).round() as i32;
+    // SAFETY: `hwnd` is this window's live handle.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn move_to(window: &Window, origin: gpui::Point<gpui::Pixels>) {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+    let Some(ns_window) = ns_window(window) else {
+        return;
+    };
+    // SAFETY: messages to this live window and to the screen list.
+    unsafe {
+        let screens: *mut Object = msg_send![class!(NSScreen), screens];
+        let primary: *mut Object = msg_send![screens, objectAtIndex: 0usize];
+        let primary_frame: NSRect = msg_send![primary, frame];
+        let point = NSPoint {
+            x: f64::from(f32::from(origin.x)),
+            y: primary_frame.h - f64::from(f32::from(origin.y)),
+        };
+        let _: () = msg_send![ns_window, setFrameTopLeftPoint: point];
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn move_to(_window: &Window, _origin: gpui::Point<gpui::Pixels>) {}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NSPoint {
+    x: f64,
+    y: f64,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NSRect {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+#[cfg(target_os = "macos")]
+fn ns_window(window: &Window) -> Option<*mut objc::runtime::Object> {
+    use objc::runtime::Object;
+    use objc::{msg_send, sel, sel_impl};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = HasWindowHandle::window_handle(window).ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::AppKit(appkit) => {
+            let view = appkit.ns_view.as_ptr() as *mut Object;
+            // SAFETY: the view belongs to this live window.
+            let ns_window: *mut Object = unsafe { msg_send![view, window] };
+            (!ns_window.is_null()).then_some(ns_window)
+        }
+        _ => None,
+    }
+}

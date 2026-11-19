@@ -1,6 +1,6 @@
-//! The app's windows: the library (where LumiFi opens), the mini player as an alternative to it
-//! (⌘L / Ctrl+L), and the settings. The library and the mini player are never open together;
-//! the music keeps playing because it lives in `Playback`, not in a window.
+//! The app's windows: the library (where LumiFi opens, settings included) and the mini player as
+//! an alternative to it (⌘L / Ctrl+L). They are never open together; the music keeps playing
+//! because it lives in `Playback`, not in a window.
 
 use gpui::{
     AnyWindowHandle, App, AppContext, Bounds, Global, Pixels, Point, Size, TitlebarOptions,
@@ -11,13 +11,12 @@ use gpui::{
 use crate::library_window::LibraryWindow;
 use crate::mini_player::{self, MiniPlayer};
 use crate::settings::settings;
-use crate::settings_window::{Section, SettingsWindow};
+use crate::settings_page::Section;
 
 #[derive(Default)]
 struct Windows {
     mini: Option<WindowHandle<MiniPlayer>>,
     library: Option<WindowHandle<LibraryWindow>>,
-    settings: Option<WindowHandle<SettingsWindow>>,
     /// Where each window was last, so switching back puts it in the same place.
     mini_origin: Option<Point<Pixels>>,
     library_bounds: Option<Bounds<Pixels>>,
@@ -36,8 +35,6 @@ pub fn open_mini(cx: &mut App) {
     let value = settings(cx).read(cx).value.clone();
     let style = value.mini_style;
     let window_size = mini_player::window_size(style, value.mini_scale);
-    let (min_scale, _) = mini_player::scale_range(style);
-    let min = mini_player::window_size(style, min_scale);
     let bounds = match windows(cx).mini_origin {
         Some(origin) => Bounds::new(origin, window_size),
         None => Bounds::centered(None, window_size, cx),
@@ -50,9 +47,9 @@ pub fn open_mini(cx: &mut App) {
             traffic_light_position: Some(point(px(-100.), px(-100.))),
         }),
         kind: WindowKind::Normal,
-        is_resizable: true,
+        // Sizes come from the right-click menu: a fixed window cannot be snapped or stretched.
+        is_resizable: false,
         is_minimizable: true,
-        window_min_size: Some(min),
         window_background: if cfg!(target_os = "linux") {
             WindowBackgroundAppearance::Opaque
         } else {
@@ -75,15 +72,16 @@ fn normal_window(title: &str, bounds: Bounds<Pixels>, min: Size<Pixels>) -> Wind
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
             title: Some(title.to_owned().into()),
-            // On macOS the content runs under the window buttons; elsewhere the system draws a
-            // normal title bar.
-            appears_transparent: cfg!(target_os = "macos"),
-            traffic_light_position: Some(point(px(16.), px(20.))),
+            // No system title bar: the header is the title bar (as in LumiPDF). On macOS the three
+            // window buttons sit inside it.
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(18.), px(19.))),
         }),
         kind: WindowKind::Normal,
         is_resizable: true,
         is_minimizable: true,
         window_min_size: Some(min),
+        window_decorations: Some(gpui::WindowDecorations::Client),
         app_id: Some("lumifi".into()),
         ..Default::default()
     }
@@ -101,27 +99,24 @@ pub fn open_library(cx: &mut App) {
     }
 }
 
-/// Opens the settings on `section`, or brings them forward if they are already open.
+/// Shows the settings page of the library, opening the library first if the mini player is
+/// showing.
 pub fn open_settings(section: Option<Section>, cx: &mut App) {
-    if let Some(handle) = windows(cx).settings {
-        let shown = handle.update(cx, |view, window, cx| {
-            if let Some(section) = section {
-                view.show(section, cx);
-            }
+    if windows(cx).library.is_none() {
+        toggle_library(cx);
+    }
+    if let Some(handle) = windows(cx).library {
+        let _ = handle.update(cx, |view, window, cx| {
+            view.show_settings(section, cx);
             window.activate_window();
         });
-        if shown.is_ok() {
-            return;
-        }
     }
-    let bounds = Bounds::centered(None, size(px(960.), px(660.)), cx);
-    let options = normal_window("Impostazioni", bounds, size(px(720.), px(480.)));
-    let section = section.unwrap_or_default();
-    match cx.open_window(options, |window, cx| {
-        cx.new(|cx| SettingsWindow::new(section, window, cx))
-    }) {
-        Ok(handle) => windows(cx).settings = Some(handle),
-        Err(error) => log::error!("cannot open the settings: {error}"),
+}
+
+/// Puts the keyboard in the library's search field.
+pub fn focus_search(cx: &mut App) {
+    if let Some(handle) = windows(cx).library {
+        let _ = handle.update(cx, |view, window, cx| view.focus_search(window, cx));
     }
 }
 

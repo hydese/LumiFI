@@ -28,6 +28,21 @@ pub enum MiniStyle {
     Square,
 }
 
+/// Where the mini player sits on the screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Dock {
+    /// Wherever it was dragged.
+    #[default]
+    Free,
+    /// Centred against the top edge of the screen.
+    Top,
+    /// Centred against the bottom edge (above the taskbar or the Dock).
+    Bottom,
+}
+
+/// The mini player's sizes, from the right-click menu.
+pub const MINI_SCALES: [f32; 5] = [0.75, 1.0, 1.25, 1.5, 2.0];
+
 /// Which window LumiFi opens with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum StartWith {
@@ -55,6 +70,13 @@ pub struct Settings {
     pub output_device: Option<String>,
     /// Show "FLAC · 24/96" next to the track.
     pub show_quality: bool,
+    pub mini_dock: Dock,
+    /// Look for a new version on GitHub at launch.
+    pub check_updates: bool,
+    /// Also offer beta versions.
+    pub beta: bool,
+    /// The first-launch welcome has been shown.
+    pub welcome_done: bool,
 }
 
 impl Default for Settings {
@@ -71,6 +93,10 @@ impl Default for Settings {
             volume: 0.8,
             output_device: None,
             show_quality: false,
+            mini_dock: Dock::Free,
+            check_updates: true,
+            beta: false,
+            welcome_done: false,
         }
     }
 }
