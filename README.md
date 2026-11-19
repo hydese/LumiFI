@@ -66,3 +66,5 @@ LumiFi è software libero, distribuito con la [GNU General Public License v3](LI
 successiva.
 
 LumiFi non è affiliato a Spotify, Apple o Google.
+
+Dedicato a mio babbo, Giuliano.
