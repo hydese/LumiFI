@@ -1,6 +1,6 @@
-# Checks every push and pull request: formatting and lints on Linux, then tests and a release
-# build on macOS (Apple Silicon) and Windows (x64). The binaries are kept as workflow artifacts
-# for a few days so anyone can try a commit without building it.
+# Every push and pull request: formatting, lints and tests on Linux (fast and cheap).
+# macOS and Windows builds run only when asked for: by hand from the Actions tab, or with
+# [build] in the commit message. Their binaries are kept as artifacts for 14 days.
 name: CI
 
 on:
@@ -17,8 +17,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  lint:
-    name: Format and lints
+  check:
+    name: Format, lints and tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -29,9 +29,12 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
 
   build:
     name: ${{ matrix.name }}
+    needs: check
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[build]')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

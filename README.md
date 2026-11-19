@@ -28,9 +28,8 @@ La tua musica, come è stata registrata.
 
 ## Provare il motore
 
-Scarica il programma per il tuo sistema dagli artifact dell'ultima
-[esecuzione della CI](https://github.com/hydese/lumifi/actions/workflows/ci.yml), oppure
-compilalo (serve [Rust](https://rustup.rs)):
+Scarica il programma dalla pagina [Releases](https://github.com/hydese/lumifi/releases) quando
+c'è una versione pubblicata, oppure compilalo (serve [Rust](https://rustup.rs)):
 
 ```sh
 cargo run --release -- info  "~/Music/album/01 - brano.flac"
