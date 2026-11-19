@@ -735,7 +735,9 @@ impl MiniPlayer {
             .id("drag-strip")
             .absolute()
             .top_0()
-            .left_0()
+            // Starts after the close button and the volume pill: on Windows a drag area wins
+            // over anything drawn on top of it, so the two must not overlap.
+            .left(px(VOLUME_LEFT + VOLUME_WIDTH + 14.0))
             .right_0()
             .h(px(44.))
             .window_control_area(WindowControlArea::Drag)
