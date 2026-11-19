@@ -1,0 +1,81 @@
+# Builds a release from a version tag (v0.1.0, v0.2.0-beta.1, ...) and saves it as a DRAFT on
+# GitHub. Nothing is public until someone publishes the draft from the Releases page.
+#
+# To release: set the version in Cargo.toml ([workspace.package]), commit, then
+#   git tag v0.1.0 && git push origin v0.1.0
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Version matches the tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match Cargo.toml (v$version)"; exit 1
+          fi
+
+  build:
+    name: ${{ matrix.name }}
+    needs: check
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - name: macOS (Apple Silicon)
+            os: macos-latest
+            suffix: macos-arm64
+          - name: Windows (x64)
+            os: windows-latest
+            suffix: windows-x64
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo build --release --workspace
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p out
+          tar -czf "out/lumifi-${GITHUB_REF_NAME}-${{ matrix.suffix }}.tar.gz" -C target/release lumifi
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory out | Out-Null
+          Compress-Archive target/release/lumifi.exe "out/lumifi-$env:GITHUB_REF_NAME-${{ matrix.suffix }}.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.suffix }}
+          path: out/*
+
+  draft:
+    name: Draft release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease";; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --draft --generate-notes $prerelease \
+            --title "LumiFi $GITHUB_REF_NAME"
