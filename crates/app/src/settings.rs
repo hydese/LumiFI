@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use gpui::{App, AppContext, Context, Entity, Global};
 use serde::{Deserialize, Serialize};
 
+pub use crate::theme::ThemeMode;
+
 /// How the mini player draws progress.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MiniView {
@@ -16,23 +18,59 @@ pub enum MiniView {
     B,
 }
 
+/// The shape of the mini player.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MiniStyle {
+    /// 480×72, like a bar on the desktop.
+    #[default]
+    Strip,
+    /// 280×280, cover art behind the controls.
+    Square,
+}
+
+/// Which window LumiFi opens with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum StartWith {
+    #[default]
+    Library,
+    Mini,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// Folders the library reads.
     pub folders: Vec<PathBuf>,
+    pub start_with: StartWith,
+    /// Reopen the last track, paused where it was.
+    pub resume: bool,
+    pub theme: ThemeMode,
+    pub mini_style: MiniStyle,
     pub mini_view: MiniView,
+    /// How much bigger than its base size the mini player is drawn (1 = 280×280 or 480×72).
+    pub mini_scale: f32,
     pub always_on_top: bool,
     pub volume: f32,
+    /// Output device by name; `None` follows the system.
+    pub output_device: Option<String>,
+    /// Show "FLAC · 24/96" next to the track.
+    pub show_quality: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             folders: Vec::new(),
+            start_with: StartWith::Library,
+            resume: true,
+            theme: ThemeMode::System,
+            mini_style: MiniStyle::Strip,
             mini_view: MiniView::B,
+            mini_scale: 1.0,
             always_on_top: false,
             volume: 0.8,
+            output_device: None,
+            show_quality: false,
         }
     }
 }
@@ -61,6 +99,11 @@ impl Paths {
 
     fn settings_file() -> PathBuf {
         Self::config_dir().join("settings.json")
+    }
+
+    /// What was playing when LumiFi closed.
+    pub fn session_file() -> PathBuf {
+        Self::data_dir().join("session.json")
     }
 }
 
@@ -139,6 +182,8 @@ mod tests {
             mini_view: MiniView::A,
             always_on_top: true,
             volume: 0.4,
+            output_device: Some("DAC".into()),
+            ..Settings::default()
         };
         let json = serde_json::to_string(&settings).unwrap();
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), settings);

@@ -49,6 +49,27 @@ pub fn default_device() -> Result<cpal::Device> {
         .ok_or(EngineError::NoOutputDevice)
 }
 
+/// The device called `name` (as `list_devices` names it), or the default one when `name` is
+/// `None` or that device is gone (unplugged headphones, a DAC switched off).
+pub fn device_named(name: Option<&str>) -> Result<cpal::Device> {
+    if let Some(name) = name {
+        let host = cpal::default_host();
+        if let Ok(devices) = host.output_devices() {
+            for device in devices {
+                let matches = device
+                    .description()
+                    .map(|d| d.to_string() == name)
+                    .unwrap_or(false);
+                if matches {
+                    return Ok(device);
+                }
+            }
+        }
+        log::info!("output device {name:?} not found, using the default one");
+    }
+    default_device()
+}
+
 /// A stream configuration for the device and how many channels it really has.
 #[derive(Debug, Clone)]
 pub struct OutputConfig {

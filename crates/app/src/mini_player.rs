@@ -1,13 +1,14 @@
-//! The square mini player: cover art filling the window, controls on hover. It only draws: the
-//! music lives in [`Playback`], shared with the library window.
+//! The mini player, in the two shapes of the approved design: a strip (480×72) and a square
+//! (280×280). Both are resizable with their proportions locked, and both always show their
+//! controls. It only draws: the music lives in [`Playback`], shared with the library window.
 
 use std::time::Duration;
 
 use gpui::{
     AnyElement, Context, Entity, ExternalPaths, FocusHandle, FontWeight, InteractiveElement,
-    IntoElement, MouseButton, MouseDownEvent, ObjectFit, ParentElement, Render, ScrollWheelEvent,
-    StatefulInteractiveElement, Styled, StyledImage, Task, Window, WindowControlArea, div, img,
-    prelude::*, px,
+    IntoElement, MouseButton, MouseDownEvent, ObjectFit, ParentElement, Pixels, Rems, Render, Rgba,
+    ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement, Styled, StyledImage, Task,
+    Window, div, img, prelude::*, px, rems, size, svg,
 };
 use lumifi_engine::format_time;
 
@@ -15,18 +16,50 @@ use crate::actions::*;
 use crate::platform;
 use crate::playback::{Playback, WAVE_BARS, playback};
 use crate::queue::Repeat;
-use crate::settings::{MiniView, SettingsModel, settings};
+use crate::settings::{MiniStyle, MiniView, SettingsModel, settings};
 use crate::theme::Theme;
-use crate::widgets::{SlideEvent, bar, icon, icon_button, slider};
+use crate::widgets::{SlideEvent, slider};
 
-/// The window is a fixed square.
-pub const SIZE: f32 = 280.0;
-/// Inner padding of the control panel; the bars span the rest of the width.
-const PAD: f32 = 14.0;
-/// Where the window drag strip starts: after the close button and the volume pill.
-const DRAG_STRIP_LEFT: f32 = 10.0 + 28.0 + 6.0 + 8.0 + 14.0 + 6.0 + 56.0 + 10.0 + 8.0;
+/// Bars in the strip's waveform.
+const STRIP_BARS: usize = 40;
 
-/// A slider being dragged with the mouse.
+/// The design's size of each shape, in points at scale 1.
+pub fn base_size(style: MiniStyle) -> (f32, f32) {
+    match style {
+        MiniStyle::Strip => (480.0, 72.0),
+        MiniStyle::Square => (280.0, 280.0),
+    }
+}
+
+/// How far each shape can be shrunk or grown.
+pub fn scale_range(style: MiniStyle) -> (f32, f32) {
+    match style {
+        MiniStyle::Strip => (0.8, 1.7),
+        MiniStyle::Square => (0.8, 2.2),
+    }
+}
+
+pub fn window_size(style: MiniStyle, scale: f32) -> Size<Pixels> {
+    let (w, h) = base_size(style);
+    let (min, max) = scale_range(style);
+    let scale = scale.clamp(min, max);
+    size(px((w * scale).round()), px((h * scale).round()))
+}
+
+/// A length in the design's points. Every size in the mini player goes through here, and the
+/// window's rem size carries the scale, so the whole layout grows and shrinks together.
+fn u(points: f32) -> Rems {
+    rems(points / 16.0)
+}
+
+fn icon(name: &str, points: f32, color: Rgba) -> gpui::Svg {
+    svg()
+        .path(SharedString::from(format!("icons/{name}.svg")))
+        .size(u(points))
+        .flex_none()
+        .text_color(color)
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Drag {
     None,
@@ -39,11 +72,10 @@ pub struct MiniPlayer {
     focus: FocusHandle,
     playback: Entity<Playback>,
     settings: Entity<SettingsModel>,
-    /// The controls are showing (mouse over the window, paused, or nothing loaded).
-    controls: bool,
-    /// Hides the controls a moment after the mouse leaves, so edges don't flicker.
-    _hide_controls: Option<Task<()>>,
+    style: MiniStyle,
+    scale: f32,
     drag: Drag,
+    _save_scale: Option<Task<()>>,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -53,52 +85,71 @@ impl MiniPlayer {
         window.focus(&focus);
         let playback = playback(cx);
         let settings = settings(cx);
-        let on_top = settings.read(cx).value.always_on_top;
-        platform::keep_on_top(window, on_top);
+        let value = settings.read(cx).value.clone();
+        platform::keep_on_top(window, value.always_on_top);
         let subscriptions = vec![
             cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
-            // Redraw with the music; at rest only the thin line moves, a few times a second.
             cx.observe(&playback, |_, _, cx| cx.notify()),
-            cx.observe_in(&settings, window, |_, settings, window, cx| {
-                platform::keep_on_top(window, settings.read(cx).value.always_on_top);
+            cx.observe_in(&settings, window, |this, settings, window, cx| {
+                let value = settings.read(cx).value.clone();
+                platform::keep_on_top(window, value.always_on_top);
+                if value.mini_style != this.style {
+                    this.style = value.mini_style;
+                    let target = window_size(this.style, this.scale);
+                    cx.defer_in(window, move |_, window, _| window.resize(target));
+                }
                 cx.notify();
             }),
+            cx.observe_window_bounds(window, |this, window, cx| this.keep_proportions(window, cx)),
         ];
+        let (min, max) = scale_range(value.mini_style);
         Self {
             focus,
             playback,
             settings,
-            controls: false,
-            _hide_controls: None,
+            style: value.mini_style,
+            scale: value.mini_scale.clamp(min, max),
             drag: Drag::None,
+            _save_scale: None,
             _subscriptions: subscriptions,
         }
     }
 
-    fn set_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
-        if hovered {
-            self._hide_controls = None;
-            if !self.controls {
-                self.controls = true;
-                cx.notify();
-            }
-            return;
+    /// After the user resizes the window: follow the side they dragged and fix the other, so the
+    /// shape keeps its proportions.
+    fn keep_proportions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (base_w, base_h) = base_size(self.style);
+        let (min, max) = scale_range(self.style);
+        let current = window.bounds().size;
+        let (w, h) = (f32::from(current.width), f32::from(current.height));
+        let by_width = w / base_w;
+        let by_height = h / base_h;
+        let scale = if (by_width - self.scale).abs() >= (by_height - self.scale).abs() {
+            by_width
+        } else {
+            by_height
         }
-        self._hide_controls = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(900))
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.controls = false;
-                cx.notify();
-            });
-        }));
-    }
-
-    pub fn toggle_on_top(&mut self, _: &ToggleOnTop, _: &mut Window, cx: &mut Context<Self>) {
-        self.settings.update(cx, |s, cx| {
-            s.update(cx, |v| v.always_on_top = !v.always_on_top)
-        });
+        .clamp(min, max);
+        let target = window_size(self.style, scale);
+        if (f32::from(target.width) - w).abs() > 1.5 || (f32::from(target.height) - h).abs() > 1.5 {
+            // Not from inside the resize callback: the platform is still busy with that one.
+            cx.defer_in(window, move |_, window, _| window.resize(target));
+        }
+        if (scale - self.scale).abs() > 0.004 {
+            self.scale = scale;
+            cx.notify();
+            // Remember the size, once the user has stopped dragging.
+            self._save_scale = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(600))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    let scale = this.scale;
+                    this.settings
+                        .update(cx, |s, cx| s.update(cx, |v| v.mini_scale = scale));
+                });
+            }));
+        }
     }
 
     fn progress(&self, cx: &Context<Self>) -> f32 {
@@ -144,13 +195,18 @@ impl MiniPlayer {
 
 impl Render for MiniPlayer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::for_appearance(window.appearance());
-        let playback = self.playback.read(cx);
-        let empty = playback.now().is_none();
-        let show_controls = self.controls || empty || playback.is_paused();
-        let error = playback.error();
-        let progress = self.progress(cx);
-
+        // The rem carries the scale: every length below is in design points through `u`.
+        window.set_rem_size(px(16.0 * self.scale));
+        let theme = Theme::current(window, cx);
+        let content = match self.style {
+            MiniStyle::Strip => self.render_strip(&theme, cx),
+            MiniStyle::Square => self.render_square(&theme, cx),
+        };
+        let radius = if self.style == MiniStyle::Strip {
+            14.
+        } else {
+            16.
+        };
         div()
             .id("mini-player")
             .key_context(PLAYER_CONTEXT)
@@ -160,13 +216,13 @@ impl Render for MiniPlayer {
             .overflow_hidden()
             // Rounded corners only where the window can be transparent (macOS); elsewhere they
             // would leave dark corners.
-            .when(cfg!(target_os = "macos"), |root| root.rounded_xl())
-            .bg(theme.ground)
+            .when(cfg!(target_os = "macos"), |root| root.rounded(u(radius)))
+            .bg(match self.style {
+                MiniStyle::Strip => theme.surface,
+                MiniStyle::Square => theme.ground,
+            })
             .text_color(theme.text)
             .font_family(".SystemUIFont")
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                this.set_hovered(*hovered, cx);
-            }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
                 let dy = f32::from(event.delta.pixel_delta(window.line_height()).y);
                 this.playback
@@ -177,274 +233,322 @@ impl Render for MiniPlayer {
                 let paths = paths.paths().to_vec();
                 this.playback.update(cx, |p, cx| p.open_paths(paths, cx));
             }))
-            .on_action(cx.listener(Self::toggle_on_top))
-            .child(self.render_cover(&theme, show_controls, cx))
-            // At rest, a thin line along the bottom still shows how far the track has got.
-            .when(!show_controls && !empty, |root| {
-                root.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom_0()
-                        .h(px(3.))
-                        .bg(theme.track)
-                        .child(div().h_full().w(gpui::relative(progress)).bg(theme.accent)),
-                )
-            })
-            .child(self.render_drag_strip())
-            .when(show_controls, |root| {
-                root.child(self.render_top_buttons(&theme, cx))
-            })
-            .when(show_controls && !empty, |root| {
-                root.child(self.render_panel(&theme, cx))
-            })
-            .when_some(error, |root, error| {
-                root.child(
-                    div()
-                        .absolute()
-                        .top(px(46.))
-                        .left(px(12.))
-                        .right(px(12.))
-                        .p(px(8.))
-                        .rounded_lg()
-                        .bg(theme.chip)
-                        .text_color(gpui::rgb(0xffffff))
-                        .text_size(px(11.5))
-                        .child(error),
-                )
-            })
+            // Behind everything: pressing on any empty spot moves the window. Buttons and sliders
+            // sit above it and keep their clicks.
+            .child(div().id("drag-layer").absolute().inset_0().on_mouse_down(
+                MouseButton::Left,
+                |_: &MouseDownEvent, window, _| {
+                    platform::start_drag(window);
+                },
+            ))
+            .child(content)
     }
 }
 
+/// A clickable icon that keeps its click (the window does not start moving under it).
+fn button(
+    id: &'static str,
+    width: f32,
+    height: f32,
+    child: impl IntoElement,
+    action: impl gpui::Action + Clone,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .w(u(width))
+        .h(u(height))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .block_mouse_except_scroll()
+        .child(child)
+        .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
+}
+
 impl MiniPlayer {
-    fn render_cover(&self, theme: &Theme, controls: bool, cx: &Context<Self>) -> AnyElement {
-        let now = self.playback.read(cx).now();
-        match now.and_then(|n| n.cover.clone()) {
+    fn cover(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
+        match self.playback.read(cx).now().and_then(|n| n.cover.clone()) {
             Some(cover) => img(cover)
-                .absolute()
-                .inset_0()
                 .size_full()
                 .object_fit(ObjectFit::Cover)
                 .into_any_element(),
-            None => {
-                let empty = now.is_none();
-                // With the controls showing, the logo shrinks into the strip above them; at rest
-                // it is centred with the title and artist under it.
-                let compact = controls && !empty;
-                let resting = !controls && !empty;
-                let logo = if compact { 52. } else { 84. };
-                let (title, subtitle) = now
-                    .map(|n| (n.title.clone(), n.subtitle.clone()))
-                    .unwrap_or_default();
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .when(!compact, |d| d.justify_center())
-                    .when(compact, |d| d.pt(px(60.)))
-                    .px(px(PAD))
-                    .gap(px(10.))
-                    .child(
-                        div()
-                            .size(px(logo))
-                            .rounded(px(logo * 0.24))
-                            .bg(theme.accent)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon("waves", logo, theme.on_accent)),
-                    )
-                    .when(resting, |d| {
-                        d.child(
-                            div()
-                                .mt(px(6.))
-                                .w_full()
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .gap(px(2.))
-                                .child(
-                                    div()
-                                        .max_w_full()
-                                        .text_size(px(14.))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .truncate()
-                                        .child(title),
-                                )
-                                .child(
-                                    div()
-                                        .max_w_full()
-                                        .text_size(px(12.))
-                                        .text_color(theme.muted)
-                                        .truncate()
-                                        .child(subtitle),
-                                ),
-                        )
-                    })
-                    .when(empty, |d| {
-                        d.child(
-                            div()
-                                .text_size(px(13.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child("Trascina qui la tua musica"),
-                        )
-                        .child(
-                            div()
-                                .id("open-empty")
-                                .mt(px(4.))
-                                .h(px(32.))
-                                .px(px(14.))
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .rounded_lg()
-                                .bg(theme.accent)
-                                .text_color(theme.on_accent)
-                                .text_size(px(12.5))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .cursor_pointer()
-                                .child(icon("folder", 14., theme.on_accent))
-                                .child("Apri musica…")
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(Open), cx)
-                                }),
-                        )
-                        .child(
-                            div()
-                                .id("open-library-empty")
-                                .text_size(px(11.5))
-                                .text_color(theme.muted)
-                                .cursor_pointer()
-                                .child("oppure apri la libreria")
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(ToggleLibrary), cx)
-                                }),
-                        )
-                    })
-                    .into_any_element()
-            }
-        }
-    }
-
-    /// A strip across the top that moves the window, since it has no title bar.
-    fn render_drag_strip(&self) -> impl IntoElement {
-        div()
-            .id("drag-strip")
-            .absolute()
-            .top_0()
-            // Starts after the close button and the volume pill, and stops before the library
-            // button: on Windows a drag area wins over anything drawn on top of it.
-            .left(px(DRAG_STRIP_LEFT))
-            .right(px(44.))
-            .h(px(44.))
-            .window_control_area(WindowControlArea::Drag)
-            .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, window, _| {
-                platform::start_drag(window);
-            })
-    }
-
-    fn render_top_buttons(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let chip = |id: &'static str| {
-            div()
-                .id(id)
-                .size(px(28.))
+            None => div()
+                .size_full()
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded_md()
-                .bg(theme.chip)
-                .cursor_pointer()
-        };
-        let has_track = self.playback.read(cx).now().is_some();
-        div()
-            .absolute()
-            .top(px(10.))
-            .left(px(10.))
-            .right(px(10.))
-            .flex()
-            .justify_between()
-            .child(
-                div()
-                    .flex()
-                    .gap(px(6.))
-                    .child(
-                        chip("close")
-                            .child(icon("close", 13., gpui::rgb(0xffffff)))
-                            .on_click(|_, _, cx| cx.quit()),
-                    )
-                    .when(has_track, |row| row.child(self.render_volume(cx))),
-            )
-            .child(
-                chip("library")
-                    .child(icon("expand", 13., gpui::rgb(0xffffff)))
-                    .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleLibrary), cx)),
-            )
+                .bg(theme.accent)
+                .child(
+                    icon("waves", 0., theme.on_accent)
+                        .w(gpui::relative(0.7))
+                        .h(gpui::relative(0.7)),
+                )
+                .into_any_element(),
+        }
     }
 
-    /// A small pill: speaker (click to mute) and a short slider. The wheel works anywhere.
-    fn render_volume(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn titles(&self, cx: &Context<Self>) -> (SharedString, SharedString) {
+        match self.playback.read(cx).now() {
+            Some(now) => (
+                now.title.clone(),
+                now.artist.clone().unwrap_or_else(|| now.subtitle.clone()),
+            ),
+            None => (
+                "Nessun brano".into(),
+                "Scegli qualcosa nella libreria".into(),
+            ),
+        }
+    }
+
+    fn play_button(
+        &self,
+        size: f32,
+        icon_size: f32,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let paused = self.playback.read(cx).is_paused();
+        button(
+            "play",
+            size,
+            size,
+            icon(
+                if paused { "play" } else { "pause" },
+                icon_size,
+                theme.on_accent,
+            ),
+            TogglePlay,
+        )
+        .rounded_full()
+        .bg(theme.accent)
+    }
+
+    /// The volume slider of the design: a 4-point track with a round knob.
+    fn volume_slider(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let volume = self.playback.read(cx).effective_volume();
-        let white = gpui::rgb(0xffffff);
         let this = cx.entity().downgrade();
-        div()
-            .id("volume-pill")
-            .h(px(28.))
-            .pl(px(8.))
-            .pr(px(10.))
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .rounded_md()
-            .bg(Theme::dark().chip)
-            .child(
-                div()
-                    .id("mute")
-                    .cursor_pointer()
-                    .child(icon(
-                        if volume == 0.0 {
-                            "volume-off"
-                        } else {
-                            "volume"
-                        },
-                        14.,
-                        white,
-                    ))
-                    .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleMute), cx)),
-            )
-            .child(slider(
-                "volume",
-                self.drag == Drag::Volume,
-                div().w(px(56.)).h(px(24.)).flex().items_center().child(bar(
-                    volume,
-                    3.,
-                    gpui::rgba(0xffffff40),
-                    white,
-                )),
-                move |event, _, cx| {
-                    let _ = this.update(cx, |this, cx| this.slide_volume(event, cx));
-                },
-            ))
+        slider(
+            "volume",
+            self.drag == Drag::Volume,
+            div()
+                .w_full()
+                .h(u(20.))
+                .flex()
+                .items_center()
+                .child(knob_track(volume, theme.track, theme.text)),
+            move |event, _, cx| {
+                let _ = this.update(cx, |this, cx| this.slide_volume(event, cx));
+            },
+        )
     }
 
-    fn render_panel(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let playback = self.playback.read(cx);
-        let (title, subtitle) = match playback.now() {
-            Some(now) => (now.title.clone(), now.subtitle.clone()),
-            None => ("LumiFi".into(), "Nessun brano".into()),
-        };
-        let total = playback.now().and_then(|n| n.duration);
+    fn mute_button(&self, points: f32, theme: &Theme, cx: &Context<Self>) -> impl IntoElement {
+        let muted = self.playback.read(cx).effective_volume() == 0.0;
+        button(
+            "mute",
+            points + 8.,
+            points + 8.,
+            icon(
+                if muted { "volume-off" } else { "volume" },
+                points,
+                theme.muted,
+            ),
+            ToggleMute,
+        )
+    }
+
+    fn pin_button(&self, theme: &Theme, color_off: Rgba, cx: &Context<Self>) -> impl IntoElement {
+        let on = self.settings.read(cx).value.always_on_top;
+        button(
+            "pin",
+            28.,
+            28.,
+            icon("pin", 14., if on { theme.accent } else { color_off }),
+            ToggleOnTop,
+        )
+    }
+
+    /// Progress as the design draws it: the waveform (B) or a plain bar (A). Drag to seek.
+    fn progress_view(
+        &self,
+        bars: usize,
+        height: f32,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let progress = self.progress(cx);
-        // While seeking, the clock shows where the knob is.
+        let view = self.settings.read(cx).value.mini_view;
+        let content = match view {
+            MiniView::A => div()
+                .h(u(height))
+                .flex()
+                .items_center()
+                .child(plain_track(progress, theme.track, theme.text))
+                .into_any_element(),
+            MiniView::B => {
+                let waveform = self.playback.read(cx).waveform();
+                let played = (progress * bars as f32) as usize;
+                div()
+                    .h(u(height))
+                    .flex()
+                    .items_center()
+                    .gap(u(if bars > 48 { 2. } else { 1.5 }))
+                    .children((0..bars).map(|i| {
+                        let peak = if waveform.is_empty() {
+                            0.15
+                        } else {
+                            waveform[i * WAVE_BARS / bars]
+                        };
+                        div()
+                            .flex_1()
+                            .h(u(3.0 + peak * (height - 3.0)))
+                            .rounded(u(1.))
+                            .bg(if i < played {
+                                theme.accent
+                            } else {
+                                theme.unplayed
+                            })
+                    }))
+                    .into_any_element()
+            }
+        };
+        let this = cx.entity().downgrade();
+        slider(
+            "progress",
+            matches!(self.drag, Drag::Seek(_)),
+            content,
+            move |event, _, cx| {
+                let _ = this.update(cx, |this, cx| this.slide_seek(event, cx));
+            },
+        )
+    }
+
+    fn times(&self, theme: &Theme, cx: &Context<Self>) -> impl IntoElement {
+        let playback = self.playback.read(cx);
+        let total = playback.now().and_then(|n| n.duration);
         let position = match (self.drag, total) {
             (Drag::Seek(at), Some(total)) => total.mul_f32(at),
             _ => playback.position(),
         };
-        let position = format_time(position);
-        let total = total.map(format_time).unwrap_or_else(|| "–:––".into());
-        let shuffle_color = if playback.is_shuffled() {
+        div()
+            .flex()
+            .justify_between()
+            .text_size(u(10.5))
+            .text_color(theme.muted)
+            .child(format_time(position))
+            .child(total.map(format_time).unwrap_or_else(|| "–:––".into()))
+    }
+
+    // The strip -------------------------------------------------------------------------------
+
+    fn render_strip(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let (title, artist) = self.titles(cx);
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .when(cfg!(target_os = "macos"), |d| {
+                d.border_1().border_color(theme.hairline).rounded(u(14.))
+            })
+            .child(
+                div()
+                    .h_full()
+                    .w(u(70.))
+                    .flex_none()
+                    .overflow_hidden()
+                    .child(self.cover(theme, cx)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .pl(u(12.))
+                    .pr(u(10.))
+                    .flex()
+                    .flex_col()
+                    .gap(u(5.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap(u(6.))
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .max_w(gpui::relative(0.7))
+                                    .text_size(u(12.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_size(u(11.))
+                                    .text_color(theme.muted)
+                                    .truncate()
+                                    .child(artist),
+                            ),
+                    )
+                    .child(self.progress_view(STRIP_BARS, 14., theme, cx)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(u(2.))
+                    .pr(u(8.))
+                    .child(button(
+                        "previous",
+                        30.,
+                        44.,
+                        icon("previous", 16., theme.text),
+                        Previous,
+                    ))
+                    .child(self.play_button(36., 15., theme, cx))
+                    .child(button(
+                        "next",
+                        30.,
+                        44.,
+                        icon("next", 16., theme.text),
+                        Next,
+                    ))
+                    .child(div().w(u(1.)).h(u(24.)).mx(u(6.)).bg(theme.hairline))
+                    .child(self.mute_button(14., theme, cx))
+                    .child(
+                        div()
+                            .w(u(56.))
+                            .mr(u(6.))
+                            .ml(u(2.))
+                            .child(self.volume_slider(theme, cx)),
+                    )
+                    .child(self.pin_button(theme, theme.muted, cx))
+                    .child(button(
+                        "library",
+                        28.,
+                        44.,
+                        icon("expand", 14., theme.muted),
+                        ToggleLibrary,
+                    )),
+            )
+            .into_any_element()
+    }
+
+    // The square ------------------------------------------------------------------------------
+
+    fn render_square(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let (title, artist) = self.titles(cx);
+        let playback = self.playback.read(cx);
+        let subtitle = match playback.now() {
+            Some(now) => now.subtitle.clone(),
+            None => artist,
+        };
+        let shuffle = if playback.is_shuffled() {
             theme.accent
         } else {
             theme.muted
@@ -454,146 +558,172 @@ impl MiniPlayer {
             Repeat::All => ("repeat", theme.accent),
             Repeat::One => ("repeat-one", theme.accent),
         };
-        let paused = playback.is_paused();
-        let viz = self.render_viz(theme, progress, cx);
-        let this = cx.entity().downgrade();
+        let volume = (playback.effective_volume() * 100.0).round() as u32;
+        let chip = gpui::rgba(0x080809a8);
+        let white = gpui::rgb(0xffffff);
 
         div()
-            .id("panel")
             .absolute()
-            .left_0()
-            .right_0()
-            .bottom_0()
-            .px(px(PAD))
-            .pt(px(11.))
-            .pb(px(10.))
-            .bg(theme.scrim)
-            .flex()
-            .flex_col()
-            .gap(px(7.))
+            .inset_0()
+            // The cover fills the window; it takes no clicks, so it moves the window too.
+            .child(div().absolute().inset_0().child(self.cover(theme, cx)))
             .child(
                 div()
+                    .absolute()
+                    .top(u(10.))
+                    .right(u(10.))
                     .flex()
-                    .flex_col()
-                    .gap(px(1.))
+                    .gap(u(6.))
                     .child(
                         div()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .truncate()
-                            .child(title),
+                            .rounded(u(8.))
+                            .bg(chip)
+                            .child(self.pin_button(theme, white, cx)),
                     )
                     .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(theme.muted)
-                            .truncate()
-                            .child(subtitle),
+                        button(
+                            "library",
+                            28.,
+                            28.,
+                            icon("expand", 14., white),
+                            ToggleLibrary,
+                        )
+                        .rounded(u(8.))
+                        .bg(chip),
                     ),
             )
             .child(
                 div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .pt(u(11.))
+                    .px(u(14.))
+                    .pb(u(10.))
+                    .bg(theme.scrim)
                     .flex()
                     .flex_col()
-                    .child(slider(
-                        "progress",
-                        matches!(self.drag, Drag::Seek(_)),
-                        viz,
-                        move |event, _, cx| {
-                            let _ = this.update(cx, |this, cx| this.slide_seek(event, cx));
-                        },
-                    ))
+                    .gap(u(7.))
                     .child(
                         div()
                             .flex()
-                            .justify_between()
-                            .text_size(px(10.5))
-                            .text_color(theme.muted)
-                            .child(position)
-                            .child(total),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(icon_button(
-                        "shuffle",
-                        "shuffle",
-                        15.,
-                        30.,
-                        shuffle_color,
-                        ToggleShuffle,
-                    ))
-                    .child(icon_button(
-                        "previous", "previous", 19., 34., theme.text, Previous,
-                    ))
+                            .flex_col()
+                            .gap(u(1.))
+                            .child(
+                                div()
+                                    .text_size(u(13.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .text_size(u(11.5))
+                                    .text_color(theme.muted)
+                                    .truncate()
+                                    .child(subtitle),
+                            ),
+                    )
                     .child(
                         div()
-                            .id("play")
-                            .size(px(42.))
-                            .rounded_full()
-                            .bg(theme.accent)
+                            .flex()
+                            .flex_col()
+                            .gap(u(3.))
+                            .child(self.progress_view(WAVE_BARS, 22., theme, cx))
+                            .child(self.times(theme, cx)),
+                    )
+                    .child(
+                        div()
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .child(icon(
-                                if paused { "play" } else { "pause" },
-                                17.,
-                                theme.on_accent,
+                            .justify_between()
+                            .child(button(
+                                "shuffle",
+                                30.,
+                                32.,
+                                icon("shuffle", 15., shuffle),
+                                ToggleShuffle,
                             ))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(TogglePlay), cx)
-                            }),
+                            .child(button(
+                                "previous",
+                                34.,
+                                36.,
+                                icon("previous", 19., theme.text),
+                                Previous,
+                            ))
+                            .child(self.play_button(42., 17., theme, cx))
+                            .child(button(
+                                "next",
+                                34.,
+                                36.,
+                                icon("next", 19., theme.text),
+                                Next,
+                            ))
+                            .child(button(
+                                "repeat",
+                                30.,
+                                32.,
+                                icon(repeat_icon, 15., repeat_color),
+                                CycleRepeat,
+                            )),
                     )
-                    .child(icon_button("next", "next", 19., 34., theme.text, Next))
-                    .child(icon_button(
-                        "repeat",
-                        repeat_icon,
-                        15.,
-                        30.,
-                        repeat_color,
-                        CycleRepeat,
-                    )),
-            )
-    }
-
-    fn render_viz(&self, theme: &Theme, progress: f32, cx: &Context<Self>) -> AnyElement {
-        match self.settings.read(cx).value.mini_view {
-            MiniView::A => div()
-                .h(px(22.))
-                .flex()
-                .items_center()
-                .child(bar(progress, 4., theme.track, theme.text))
-                .into_any_element(),
-            MiniView::B => {
-                let played = (progress * WAVE_BARS as f32) as usize;
-                let waveform = self.playback.read(cx).waveform();
-                let peaks = if waveform.is_empty() {
-                    vec![0.15; WAVE_BARS]
-                } else {
-                    waveform.to_vec()
-                };
-                div()
-                    .h(px(22.))
-                    .flex()
-                    .items_center()
-                    .gap(px(2.))
-                    .children(peaks.into_iter().enumerate().map(|(i, peak)| {
+                    .child(
                         div()
-                            .flex_1()
-                            .h(px(3.0 + peak * 19.0))
-                            .rounded(px(1.))
-                            .bg(if i < played {
-                                theme.accent
-                            } else {
-                                theme.unplayed
-                            })
-                    }))
-                    .into_any_element()
-            }
-        }
+                            .flex()
+                            .items_center()
+                            .gap(u(8.))
+                            .text_color(theme.muted)
+                            .child(self.mute_button(14., theme, cx))
+                            .child(div().flex_1().child(self.volume_slider(theme, cx)))
+                            .child(
+                                div()
+                                    .w(u(22.))
+                                    .flex()
+                                    .justify_end()
+                                    .text_size(u(10.5))
+                                    .child(volume.to_string()),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
+}
+
+/// A 4-point bar with a 12-point round knob at `fraction`.
+fn knob_track(fraction: f32, track: Rgba, fill: Rgba) -> impl IntoElement {
+    let fraction = fraction.clamp(0.0, 1.0);
+    div()
+        .w_full()
+        .h(u(4.))
+        .rounded(u(2.))
+        .bg(track)
+        .relative()
+        .child(
+            div()
+                .h_full()
+                .w(gpui::relative(fraction))
+                .rounded(u(2.))
+                .bg(fill),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(u(-4.))
+                .left(gpui::relative(fraction))
+                .ml(u(-6.))
+                .size(u(12.))
+                .rounded_full()
+                .bg(fill),
+        )
+}
+
+fn plain_track(fraction: f32, track: Rgba, fill: Rgba) -> impl IntoElement {
+    div().w_full().h(u(4.)).rounded(u(2.)).bg(track).child(
+        div()
+            .h_full()
+            .w(gpui::relative(fraction.clamp(0.0, 1.0)))
+            .rounded(u(2.))
+            .bg(fill),
+    )
 }

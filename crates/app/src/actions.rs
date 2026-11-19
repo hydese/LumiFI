@@ -23,6 +23,7 @@ actions!(
         Open,
         ToggleOnTop,
         ToggleLibrary,
+        OpenSettings,
         Quit,
     ]
 );
@@ -44,6 +45,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("s", ToggleShuffle, ctx),
         KeyBinding::new("r", CycleRepeat, ctx),
         KeyBinding::new("v", CycleView, ctx),
+        KeyBinding::new("t", ToggleOnTop, ctx),
+        KeyBinding::new("secondary-,", OpenSettings, None),
         KeyBinding::new("secondary-l", ToggleLibrary, None),
         KeyBinding::new("secondary-o", Open, None),
         KeyBinding::new("secondary-q", Quit, None),
@@ -52,7 +55,15 @@ pub fn bind_keys(cx: &mut App) {
 
 /// Playback and settings actions that do not depend on a window.
 pub fn register_global(cx: &mut App) {
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &Quit, cx| {
+        playback(cx).update(cx, |p, _| p.save_session());
+        cx.quit();
+    });
+    cx.on_action(|_: &ToggleOnTop, cx| {
+        settings(cx).update(cx, |s, cx| {
+            s.update(cx, |v| v.always_on_top = !v.always_on_top)
+        });
+    });
     cx.on_action(|_: &TogglePlay, cx| playback(cx).update(cx, |p, cx| p.toggle_play(cx)));
     cx.on_action(|_: &Next, cx| playback(cx).update(cx, |p, cx| p.next(cx)));
     cx.on_action(|_: &Previous, cx| playback(cx).update(cx, |p, cx| p.previous(cx)));

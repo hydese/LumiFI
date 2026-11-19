@@ -58,7 +58,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
 }
 
 /// What happens at the end of the queue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Repeat {
     #[default]
     Off,
@@ -89,7 +89,45 @@ pub struct Queue {
     seed: u64,
 }
 
+/// The queue as saved between launches.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct QueueState {
+    pub tracks: Vec<PathBuf>,
+    pub order: Vec<usize>,
+    pub position: usize,
+    pub repeat: Repeat,
+    pub shuffle: bool,
+}
+
 impl Queue {
+    pub fn state(&self) -> QueueState {
+        QueueState {
+            tracks: self.tracks.clone(),
+            order: self.order.clone(),
+            position: self.position,
+            repeat: self.repeat,
+            shuffle: self.shuffle,
+        }
+    }
+
+    /// Puts back a saved queue, if it still makes sense.
+    pub fn restore(&mut self, state: QueueState) -> bool {
+        let n = state.tracks.len();
+        let valid = n > 0
+            && state.order.len() == n
+            && state.position < n
+            && state.order.iter().all(|&i| i < n);
+        if valid {
+            self.tracks = state.tracks;
+            self.order = state.order;
+            self.position = state.position;
+            self.repeat = state.repeat;
+            self.shuffle = state.shuffle;
+        }
+        valid
+    }
+
     pub fn new(seed: u64) -> Self {
         Self {
             seed: seed | 1,
@@ -281,6 +319,23 @@ mod tests {
         let (order, position) = q.upcoming();
         assert_eq!(position, 0);
         assert_eq!(order.len(), 5);
+    }
+
+    #[test]
+    fn state_round_trips_and_rejects_nonsense() {
+        let mut q = Queue::new(9);
+        q.replace_at(tracks(4), 2);
+        q.repeat = Repeat::All;
+        let saved = q.state();
+        let mut other = Queue::new(1);
+        assert!(other.restore(saved.clone()));
+        assert_eq!(other.current(), Some(Path::new("02.flac")));
+        assert_eq!(other.repeat, Repeat::All);
+        let broken = QueueState {
+            position: 99,
+            ..saved
+        };
+        assert!(!Queue::new(1).restore(broken));
     }
 
     #[test]

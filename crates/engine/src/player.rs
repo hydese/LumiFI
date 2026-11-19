@@ -54,6 +54,16 @@ impl Player {
 
     /// Opens `path` and starts playing from `start`, at `volume` (0.0 to 1.0).
     pub fn play_from(path: &Path, start: Duration, volume: f32) -> Result<Self> {
+        Self::play_on(path, start, volume, None)
+    }
+
+    /// Like `play_from`, on the output device called `device` (`None`: the system's default).
+    pub fn play_on(
+        path: &Path,
+        start: Duration,
+        volume: f32,
+        device: Option<&str>,
+    ) -> Result<Self> {
         let mut source = Source::open(path)?;
         if !start.is_zero() {
             source.seek(start)?;
@@ -66,7 +76,7 @@ impl Player {
             return Err(EngineError::Unsupported("more than 8 channels"));
         }
 
-        let device = output::default_device()?;
+        let device = output::device_named(device)?;
         let device_name = device
             .description()
             .map(|description| description.to_string())

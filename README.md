@@ -50,14 +50,22 @@ cargo run --release -p lumifi -- ~/Music/Album     # parte subito con una cartel
 | ↑ / ↓ e rotella | Volume |
 | M | Silenzia |
 | S / R | Casuale / ripeti (tutto, un brano) |
-| V | Mini player: vista A (barra) o B (forma d'onda), anche dalle Impostazioni |
-| ⌘L / Ctrl+L | Passa dal mini player all'app completa e ritorno |
+| V | Mini player: avanzamento A (barra) o B (forma d'onda) |
+| T | Mini player sempre in primo piano |
+| ⌘L / Ctrl+L | Libreria ⇄ mini player |
+| ⌘, / Ctrl+, | Impostazioni |
 | ⌘O / Ctrl+O | Apri file o cartelle |
 
-Il mini player si sposta trascinandolo dalla parte alta; i comandi compaiono quando ci passi
-sopra con il mouse. Il pulsante in alto a destra apre l'**app completa**: album, artisti, brani
-e impostazioni, con la barra di riproduzione in basso. La musica non si ferma quando cambi
-finestra.
+LumiFi si apre sulla **libreria**: album, artisti e brani, con la barra di riproduzione in
+basso. Il pulsante **Mini player** in alto (o Ctrl+L) la sostituisce con il mini player, a
+**striscia** o **quadrato** (si sceglie in Impostazioni › Aspetto). Il mini player si sposta
+trascinandolo da un punto libero, si ridimensiona dal bordo mantenendo le proporzioni, e la
+puntina lo tiene sopra le altre finestre. La musica non si ferma quando cambi finestra, e
+all'avvio LumiFi riprende dall'ultimo brano, in pausa.
+
+Un clic sul logo LumiFi (o sull'ingranaggio) apre le **Impostazioni**: Generale, Audio (anche
+la scelta dell'uscita), Libreria, Equalizzatore, Servizi, Aspetto, Informazioni. Quello che non
+c'è ancora è segnato "In arrivo".
 
 La libreria legge la cartella Musica del sistema; altre cartelle si aggiungono dalle
 Impostazioni. LumiFi tiene le sue cose in:

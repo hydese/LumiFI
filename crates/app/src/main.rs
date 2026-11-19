@@ -1,7 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-//! LumiFi: a small, light music player. A square mini player, and a full library window one
-//! shortcut away (⌘L / Ctrl+L).
+//! LumiFi: a small, light music player. It opens on the library; the mini player (a strip or a
+//! square) is one shortcut away (⌘L / Ctrl+L).
 
 mod actions;
 mod assets;
@@ -12,6 +12,7 @@ mod platform;
 mod playback;
 mod queue;
 mod settings;
+mod settings_window;
 mod theme;
 mod widgets;
 mod windows;
@@ -23,7 +24,7 @@ use gpui::{App, Application, Menu, MenuItem};
 use crate::actions::*;
 use crate::library::Library;
 use crate::playback::Playback;
-use crate::settings::{Settings, SettingsModel};
+use crate::settings::{Settings, SettingsModel, StartWith};
 
 /// `file:///Users/leo/Music/a%20b.flac` → `/Users/leo/Music/a b.flac`.
 fn file_url_to_path(url: &str) -> Option<PathBuf> {
@@ -60,18 +61,25 @@ fn main() {
     });
     app.run(move |cx: &mut App| {
         let settings = Settings::load();
-        Playback::install(settings.volume, cx);
-        Library::install(settings.folders.clone(), cx);
+        let start_with_mini = settings.start_with == StartWith::Mini;
+        let resume = settings.resume;
+        let volume = settings.volume;
+        let folders = settings.folders.clone();
         SettingsModel::install(settings, cx);
+        let playback = Playback::install(volume, cx);
+        Library::install(folders, cx);
 
         actions::bind_keys(cx);
         actions::register_global(cx);
-        // Deferred: the action arrives while a window is being updated, and that window can only be
-        // read and closed once the update is over.
+        // Deferred: these actions arrive while a window is being updated, and windows can only
+        // be opened, read and closed once that update is over.
         cx.on_action(|_: &ToggleLibrary, cx| cx.defer(windows::toggle_library));
-        // Closing the last window (the library's close button) quits, like any music app.
+        cx.on_action(|_: &OpenSettings, cx| cx.defer(|cx| windows::open_settings(None, cx)));
+        // Closing the player (the library's close button) quits, like any music app; the
+        // settings window alone does not keep LumiFi open.
         cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
+            if !windows::player_is_open(cx) {
+                playback::playback(cx).update(cx, |p, _| p.save_session());
                 cx.quit();
             }
         })
@@ -79,7 +87,11 @@ fn main() {
         cx.set_menus(vec![
             Menu {
                 name: "LumiFi".into(),
-                items: vec![MenuItem::action("Esci da LumiFi", Quit)],
+                items: vec![
+                    MenuItem::action("Impostazioni…", OpenSettings),
+                    MenuItem::separator(),
+                    MenuItem::action("Esci da LumiFi", Quit),
+                ],
             },
             Menu {
                 name: "File".into(),
@@ -107,14 +119,21 @@ fn main() {
                 name: "Vista".into(),
                 items: vec![
                     MenuItem::action("Libreria / Mini player", ToggleLibrary),
+                    MenuItem::action("Cambia avanzamento del mini player (A/B)", CycleView),
                     MenuItem::action("Sempre in primo piano", ToggleOnTop),
                 ],
             },
         ]);
 
-        windows::open_mini(cx);
+        if start_with_mini {
+            windows::open_mini(cx);
+        } else {
+            windows::open_library(cx);
+        }
         if !files.is_empty() {
-            playback::playback(cx).update(cx, |p, cx| p.open_paths(files.clone(), cx));
+            playback.update(cx, |p, cx| p.open_paths(files.clone(), cx));
+        } else if resume {
+            playback.update(cx, |p, cx| p.resume_session(cx));
         }
         cx.activate(true);
     });

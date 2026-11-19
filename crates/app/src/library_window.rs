@@ -1,12 +1,13 @@
-//! The full app: sidebar, library pages and a Spotify-style player bar along the bottom.
+//! The library, as in the approved design: a header with the logo, the mini player and the
+//! settings; the sidebar; the pages; and a Spotify-style player bar along the bottom.
 
 use std::path::Path;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, FocusHandle, FontWeight, InteractiveElement,
-    IntoElement, ObjectFit, ParentElement, PathPromptOptions, Render, ScrollWheelEvent,
-    SharedString, StatefulInteractiveElement, Styled, StyledImage, UniformListScrollHandle,
-    WeakEntity, Window, div, img, prelude::*, px, uniform_list,
+    IntoElement, ObjectFit, ParentElement, Render, ScrollWheelEvent, SharedString,
+    StatefulInteractiveElement, Styled, StyledImage, UniformListScrollHandle, WeakEntity, Window,
+    div, img, prelude::*, px, uniform_list,
 };
 use lumifi_engine::format_time;
 
@@ -14,16 +15,22 @@ use crate::actions::*;
 use crate::library::{Library, LibraryData, library};
 use crate::playback::{Playback, playback};
 use crate::queue::Repeat;
-use crate::settings::{MiniView, SettingsModel, settings};
+use crate::settings::{SettingsModel, settings};
+use crate::settings_window::Section;
 use crate::theme::Theme;
-use crate::widgets::{SlideEvent, bar, icon, icon_button, slider};
+use crate::widgets::{SlideEvent, icon, logo, slider};
+use crate::windows;
 
-const SIDEBAR_WIDTH: f32 = 220.0;
+const HEADER_HEIGHT: f32 = 52.0;
+const SIDEBAR_WIDTH: f32 = 232.0;
+/// Below this window width the sidebar shows icons only and the album column goes away.
+const COMPACT_WIDTH: f32 = 960.0;
+const SIDEBAR_COMPACT: f32 = 64.0;
 const CONTENT_PAD: f32 = 28.0;
-const CARD_MIN: f32 = 160.0;
-const CARD_GAP: f32 = 20.0;
-const PLAYER_BAR_HEIGHT: f32 = 84.0;
-const ROW_HEIGHT: f32 = 40.0;
+const CARD_MIN: f32 = 150.0;
+const CARD_GAP: f32 = 18.0;
+const PLAYER_BAR_HEIGHT: f32 = 76.0;
+const ROW_HEIGHT: f32 = 52.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
@@ -32,7 +39,6 @@ pub enum Page {
     Artists,
     Artist(usize),
     Tracks,
-    Settings,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -54,6 +60,8 @@ pub struct LibraryWindow {
     albums_scroll: UniformListScrollHandle,
     artists_scroll: UniformListScrollHandle,
     tracks_scroll: UniformListScrollHandle,
+    /// The title last given to the window (the playing track, for the taskbar).
+    window_title: String,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -66,11 +74,14 @@ impl LibraryWindow {
         let settings = settings(cx);
         let subscriptions = vec![
             cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
-            cx.observe(&playback, |_, _, cx| cx.notify()),
+            cx.observe_in(&playback, window, |this, _, window, cx| {
+                this.update_title(window, cx);
+                cx.notify();
+            }),
             cx.observe(&library, |_, _, cx| cx.notify()),
             cx.observe(&settings, |_, _, cx| cx.notify()),
         ];
-        Self {
+        let mut this = Self {
             focus,
             playback,
             library,
@@ -81,7 +92,25 @@ impl LibraryWindow {
             albums_scroll: UniformListScrollHandle::new(),
             artists_scroll: UniformListScrollHandle::new(),
             tracks_scroll: UniformListScrollHandle::new(),
+            window_title: String::new(),
             _subscriptions: subscriptions,
+        };
+        this.update_title(window, cx);
+        this
+    }
+
+    /// "Title – Artist" while something is loaded, so the Windows taskbar shows the track.
+    fn update_title(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let title = match self.playback.read(cx).now() {
+            Some(now) => match &now.artist {
+                Some(artist) => format!("{} – {}", now.title, artist),
+                None => now.title.to_string(),
+            },
+            None => "LumiFi".to_owned(),
+        };
+        if title != self.window_title {
+            window.set_window_title(&title);
+            self.window_title = title;
         }
     }
 
@@ -122,48 +151,6 @@ impl LibraryWindow {
         let paths = data.tracks.iter().map(|t| t.path.clone()).collect();
         self.playback
             .update(cx, |p, cx| p.play_list(paths, start, cx));
-    }
-
-    fn add_folder(&mut self, cx: &mut Context<Self>) {
-        let answer = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: true,
-            prompt: Some("Aggiungi".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = answer.await {
-                let _ = this.update(cx, |this, cx| {
-                    this.settings.update(cx, |s, cx| {
-                        s.update(cx, |v| {
-                            for path in paths {
-                                if !v.folders.contains(&path) {
-                                    v.folders.push(path);
-                                }
-                            }
-                        })
-                    });
-                    this.rescan(cx);
-                });
-            }
-        })
-        .detach();
-    }
-
-    fn remove_folder(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.settings.update(cx, |s, cx| {
-            s.update(cx, |v| {
-                if index < v.folders.len() {
-                    v.folders.remove(index);
-                }
-            })
-        });
-        self.rescan(cx);
-    }
-
-    fn rescan(&mut self, cx: &mut Context<Self>) {
-        let folders = self.settings.read(cx).value.folders.clone();
-        self.library.update(cx, |l, cx| l.rescan(folders, cx));
     }
 
     fn slide_volume(&mut self, event: SlideEvent, cx: &mut Context<Self>) {
@@ -210,16 +197,21 @@ impl LibraryWindow {
     }
 }
 
+fn open_settings(section: Option<Section>, cx: &mut App) {
+    // Deferred: opening a window from inside another window's click is not allowed.
+    cx.defer(move |cx| windows::open_settings(section, cx));
+}
+
 impl Render for LibraryWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::for_appearance(window.appearance());
+        let theme = Theme::current(window, cx);
+        let compact = f32::from(window.viewport_size().width) < COMPACT_WIDTH;
         let content = match self.page {
-            Page::Albums => self.render_albums(&theme, window, cx),
-            Page::Album(index) => self.render_album(index, &theme, cx),
+            Page::Albums => self.render_albums(&theme, compact, window, cx),
+            Page::Album(index) => self.render_album(index, &theme, compact, cx),
             Page::Artists => self.render_artists(&theme, cx),
-            Page::Artist(index) => self.render_artist(index, &theme, window, cx),
-            Page::Tracks => self.render_tracks(&theme, cx),
-            Page::Settings => self.render_settings(&theme, cx),
+            Page::Artist(index) => self.render_artist(index, &theme, compact, window, cx),
+            Page::Tracks => self.render_tracks(&theme, compact, cx),
         };
         div()
             .id("library-window")
@@ -236,12 +228,13 @@ impl Render for LibraryWindow {
                 let paths = paths.paths().to_vec();
                 this.playback.update(cx, |p, cx| p.open_paths(paths, cx));
             }))
+            .child(self.render_header(&theme))
             .child(
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_sidebar(&theme, cx))
+                    .child(self.render_sidebar(&theme, compact, cx))
                     .child(
                         div()
                             .flex_1()
@@ -252,22 +245,93 @@ impl Render for LibraryWindow {
                             .child(content),
                     ),
             )
-            .child(self.render_player_bar(&theme, cx))
+            .child(self.render_player_bar(&theme, compact, cx))
     }
 }
 
-// Sidebar -----------------------------------------------------------------------------------
+// Header and sidebar ------------------------------------------------------------------------
 
 impl LibraryWindow {
-    fn render_sidebar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_header(&self, theme: &Theme) -> impl IntoElement {
+        div()
+            .h(px(HEADER_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(16.))
+            .px(px(16.))
+            .bg(theme.bar)
+            .border_b_1()
+            .border_color(theme.hairline)
+            .child(
+                div()
+                    .id("logo")
+                    // Room for the macOS window buttons.
+                    .when(cfg!(target_os = "macos"), |d| d.ml(px(70.)))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(6.))
+                    .py(px(4.))
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme.hover))
+                    .child(logo(22., theme))
+                    .child(
+                        div()
+                            .text_size(px(13.5))
+                            .font_weight(FontWeight::BOLD)
+                            .child("LumiFi"),
+                    )
+                    .on_click(|_, _, cx| open_settings(None, cx)),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("mini-player-button")
+                    .h(px(30.))
+                    .px(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(theme.hairline)
+                    .text_size(px(12.))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme.hover))
+                    .child(icon("minimize", 13., theme.text))
+                    .child("Mini player")
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleLibrary), cx)),
+            )
+            .child(
+                div()
+                    .id("settings-button")
+                    .size(px(36.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme.hover))
+                    .child(icon("settings", 17., theme.muted))
+                    .on_click(|_, _, cx| open_settings(None, cx)),
+            )
+    }
+
+    fn render_sidebar(
+        &self,
+        theme: &Theme,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let section = |label: &'static str| {
             div()
-                .px(px(12.))
-                .pt(px(18.))
+                .px(px(10.))
                 .pb(px(6.))
                 .text_size(px(11.))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.muted)
+                .text_color(theme.faint)
                 .child(label)
         };
         let current = match self.page {
@@ -279,123 +343,180 @@ impl LibraryWindow {
             let active = current == page;
             div()
                 .id(id)
-                .h(px(34.))
-                .px(px(12.))
+                .h(px(32.))
+                .px(px(10.))
                 .flex()
                 .items_center()
+                .when(compact, |d| d.justify_center())
                 .gap(px(10.))
-                .rounded_md()
+                .rounded(px(7.))
                 .cursor_pointer()
-                .when(active, |d| d.bg(theme.hover))
-                .hover(|d| d.bg(theme.hover))
+                .when(active, |d| {
+                    d.bg(theme.accent_soft)
+                        .text_color(theme.accent_text)
+                        .font_weight(FontWeight::SEMIBOLD)
+                })
+                .when(!active, |d| d.hover(|d| d.bg(theme.hover)))
                 .child(icon(
                     icon_name,
-                    16.,
-                    if active { theme.accent } else { theme.muted },
+                    15.,
+                    if active {
+                        theme.accent_text
+                    } else {
+                        theme.text
+                    },
                 ))
-                .child(
-                    div()
-                        .when(active, |d| d.font_weight(FontWeight::SEMIBOLD))
-                        .child(label),
-                )
+                .when(!compact, |d| d.child(label))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go_root(page, cx)))
         };
-        let scan = self.library.read(cx).scan_progress();
+        let library = self.library.read(cx);
+        let data = library.data();
+        let scan = library.scan_progress();
         div()
-            .w(px(SIDEBAR_WIDTH))
+            .w(px(if compact { SIDEBAR_COMPACT } else { SIDEBAR_WIDTH }))
             .h_full()
             .flex_none()
-            .flex()
-            .flex_col()
+            .px(px(10.))
+            .py(px(16.))
             .bg(theme.sidebar)
             .border_r_1()
-            .border_color(theme.border)
-            .px(px(10.))
-            // Room for the macOS window buttons.
-            .pt(px(if cfg!(target_os = "macos") { 40. } else { 16. }))
-            .pb(px(12.))
+            .border_color(theme.hairline)
+            .flex()
+            .flex_col()
+            .gap(px(18.))
             .child(
                 div()
-                    .px(px(8.))
-                    .pb(px(4.))
                     .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .child(
-                        div()
-                            .size(px(28.))
-                            .rounded(px(7.))
-                            .bg(theme.accent)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon("waves", 28., theme.on_accent)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(16.))
-                            .font_weight(FontWeight::BOLD)
-                            .child("LumiFi"),
-                    ),
+                    .flex_col()
+                    .gap(px(2.))
+                    .when(!compact, |d| d.child(section("LIBRERIA")))
+                    .child(item("nav-albums", "grid", "Album", Page::Albums))
+                    .child(item("nav-artists", "artist", "Artisti", Page::Artists))
+                    .child(item("nav-tracks", "note", "Brani", Page::Tracks)),
             )
-            .child(section("LIBRERIA"))
-            .child(item("nav-albums", "album", "Album", Page::Albums))
-            .child(item("nav-artists", "artist", "Artisti", Page::Artists))
-            .child(item("nav-tracks", "note", "Brani", Page::Tracks))
-            .child(section("PLAYLIST"))
-            .child(
-                div()
-                    .px(px(12.))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .text_color(theme.muted)
-                    .child(icon("playlist", 16., theme.muted))
-                    .child("In arrivo"),
-            )
-            .child(div().flex_1())
-            .when_some(scan, |d, (read, found)| {
+            .when(!compact, |d| {
                 d.child(
                     div()
-                        .px(px(12.))
-                        .pb(px(8.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(section("SERVIZI"))
+                        .child(
+                            div()
+                                .id("services-hint")
+                                .mx(px(4.))
+                                .p(px(10.))
+                                .rounded(px(8.))
+                                .border_1()
+                                .border_color(theme.hairline_strong)
+                                .text_size(px(12.))
+                                .line_height(px(17.))
+                                .text_color(theme.muted)
+                                .cursor_pointer()
+                                .hover(|d| d.bg(theme.hover))
+                                .child("Spotify, Apple Music e altri compaiono qui quando li attivi nelle impostazioni.")
+                                .on_click(|_, _, cx| open_settings(Some(Section::Services), cx)),
+                        ),
+                )
+            })
+            .child(div().flex_1())
+            .when(!compact, |d| {
+                d.child(
+                    div()
+                        .px(px(10.))
                         .flex()
                         .flex_col()
                         .gap(px(6.))
                         .text_size(px(11.5))
                         .text_color(theme.muted)
-                        .child(if found == 0 {
-                            "Cerco la musica…".to_string()
-                        } else {
-                            format!("Leggo la libreria: {read} di {found}")
-                        })
-                        .child(bar(
-                            if found == 0 {
-                                0.0
+                        .child(format!(
+                            "{} brani · {} album",
+                            thousands(data.tracks.len()),
+                            thousands(data.albums.len())
+                        ))
+                        .when_some(scan, |d, (read, found)| {
+                            d.child(if found == 0 {
+                                "Cerco la musica…".to_string()
                             } else {
-                                read as f32 / found as f32
-                            },
-                            3.,
-                            theme.track,
-                            theme.accent,
-                        )),
+                                format!("Leggo la libreria: {read} di {found}")
+                            })
+                            .child(plain_bar(
+                                if found == 0 {
+                                    0.0
+                                } else {
+                                    read as f32 / found as f32
+                                },
+                                3.,
+                                theme,
+                            ))
+                        }),
                 )
             })
-            .child(item(
-                "nav-settings",
-                "settings",
-                "Impostazioni",
-                Page::Settings,
-            ))
     }
+}
+
+/// 2418 → "2.418", as Italians write it.
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push('.');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn plain_bar(fraction: f32, height: f32, theme: &Theme) -> impl IntoElement {
+    div()
+        .w_full()
+        .h(px(height))
+        .rounded_full()
+        .bg(theme.track)
+        .child(
+            div()
+                .h_full()
+                .w(gpui::relative(fraction.clamp(0.0, 1.0)))
+                .rounded_full()
+                .bg(theme.accent),
+        )
+}
+
+/// A 4-pixel bar with a round knob, as in the design's player bar.
+fn knob_bar(fraction: f32, theme: &Theme) -> impl IntoElement {
+    let fraction = fraction.clamp(0.0, 1.0);
+    div()
+        .w_full()
+        .h(px(4.))
+        .rounded(px(2.))
+        .bg(theme.track)
+        .relative()
+        .child(
+            div()
+                .h_full()
+                .w(gpui::relative(fraction))
+                .rounded(px(2.))
+                .bg(theme.text),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(px(-4.))
+                .left(gpui::relative(fraction))
+                .ml(px(-6.))
+                .size(px(12.))
+                .rounded_full()
+                .bg(theme.text),
+        )
 }
 
 // Pages -------------------------------------------------------------------------------------
 
-/// The big title at the top of a page, with a back arrow when there is history.
+/// The page title with its count beside it, and a back arrow when there is history.
 fn page_header(
     title: impl Into<SharedString>,
-    subtitle: Option<String>,
+    count: Option<String>,
     can_go_back: bool,
     theme: &Theme,
     cx: &mut Context<LibraryWindow>,
@@ -403,41 +524,46 @@ fn page_header(
     div()
         .flex_none()
         .px(px(CONTENT_PAD))
-        .pt(px(if cfg!(target_os = "macos") { 34. } else { 22. }))
-        .pb(px(14.))
+        .pt(px(22.))
+        .pb(px(16.))
         .flex()
         .items_center()
         .gap(px(12.))
-        .when(can_go_back, |d| {
-            d.child(
-                div()
-                    .id("back")
-                    .size(px(30.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .bg(theme.hover)
-                    .cursor_pointer()
-                    .child(icon("back", 16., theme.text))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.back(cx))),
-            )
-        })
+        .when(can_go_back, |d| d.child(back_button(theme, cx)))
         .child(
             div()
                 .flex()
-                .flex_col()
+                .items_baseline()
+                .gap(px(10.))
+                .min_w_0()
                 .child(
                     div()
                         .text_size(px(26.))
                         .font_weight(FontWeight::BOLD)
+                        .truncate()
                         .child(title.into()),
                 )
-                .when_some(subtitle, |d, s| {
-                    d.child(div().text_color(theme.muted).text_size(px(12.5)).child(s))
+                .when_some(count, |d, count| {
+                    d.child(div().text_color(theme.muted).child(count))
                 }),
         )
         .into_any_element()
+}
+
+fn back_button(theme: &Theme, cx: &mut Context<LibraryWindow>) -> impl IntoElement {
+    div()
+        .id("back")
+        .size(px(30.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(theme.field)
+        .cursor_pointer()
+        .hover(|d| d.bg(theme.hover))
+        .child(icon("back", 16., theme.text))
+        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.back(cx)))
 }
 
 /// A square cover from the thumbnail cache, or the LumiFi waves when there is none.
@@ -463,14 +589,33 @@ fn cover(path: Option<&Path>, size: Option<f32>, radius: f32, theme: &Theme) -> 
             .flex()
             .items_center()
             .justify_center()
-            .child(icon("waves", size.unwrap_or(120.) * 0.45, theme.muted))
+            .child(icon("waves", size.unwrap_or(120.) * 0.45, theme.faint))
             .into_any_element(),
     }
 }
 
+/// The round accent ▶ shown over covers and rows under the mouse.
+fn play_dot(size: f32, theme: &Theme) -> gpui::Div {
+    div()
+        .size(px(size))
+        .flex_none()
+        .rounded_full()
+        .bg(theme.accent)
+        .flex()
+        .items_center()
+        .justify_center()
+        .shadow_md()
+        .child(icon("play", size * 0.42, theme.on_accent))
+}
+
 impl LibraryWindow {
-    fn grid_columns(window: &Window) -> (usize, f32) {
-        let width = f32::from(window.viewport_size().width) - SIDEBAR_WIDTH - 2.0 * CONTENT_PAD;
+    fn grid_columns(window: &Window, compact: bool) -> (usize, f32) {
+        let sidebar = if compact {
+            SIDEBAR_COMPACT
+        } else {
+            SIDEBAR_WIDTH
+        };
+        let width = f32::from(window.viewport_size().width) - sidebar - 2.0 * CONTENT_PAD;
         let columns = ((width + CARD_GAP) / (CARD_MIN + CARD_GAP))
             .floor()
             .max(2.0) as usize;
@@ -487,16 +632,7 @@ impl LibraryWindow {
             .items_center()
             .justify_center()
             .gap(px(12.))
-            .child(
-                div()
-                    .size(px(72.))
-                    .rounded(px(18.))
-                    .bg(theme.accent)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(icon("waves", 72., theme.on_accent)),
-            )
+            .child(logo(72., theme))
             .child(
                 div()
                     .text_size(px(16.))
@@ -511,25 +647,25 @@ impl LibraryWindow {
                 d.child(
                     div()
                         .text_color(theme.muted)
-                        .child("Scegli la cartella dove tieni la musica."),
+                        .child("Scegli nelle impostazioni la cartella dove tieni la musica."),
                 )
                 .child(
                     div()
-                        .id("empty-add-folder")
+                        .id("empty-settings")
                         .mt(px(4.))
                         .h(px(34.))
                         .px(px(16.))
                         .flex()
                         .items_center()
                         .gap(px(8.))
-                        .rounded_lg()
+                        .rounded(px(8.))
                         .bg(theme.accent)
                         .text_color(theme.on_accent)
                         .font_weight(FontWeight::SEMIBOLD)
                         .cursor_pointer()
                         .child(icon("folder", 15., theme.on_accent))
-                        .child("Aggiungi cartella…")
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.add_folder(cx))),
+                        .child("Scegli le cartelle…")
+                        .on_click(|_, _, cx| open_settings(Some(Section::Library), cx)),
                 )
             })
             .into_any_element()
@@ -543,19 +679,44 @@ impl LibraryWindow {
         this: WeakEntity<Self>,
     ) -> AnyElement {
         let album = &data.albums[index];
+        let group = SharedString::from(format!("album-card-{index}"));
+        let play = this.clone();
         div()
             .id(("album", index))
+            .group(group.clone())
             .w(px(card))
             .flex_none()
             .flex()
             .flex_col()
             .gap(px(8.))
             .cursor_pointer()
-            .child(cover(album.cover.as_deref(), Some(card), 8., theme))
             .child(
                 div()
+                    .relative()
+                    .size(px(card))
+                    .child(cover(album.cover.as_deref(), Some(card), 8., theme))
+                    .child(
+                        div()
+                            .id(("album-play", index))
+                            .absolute()
+                            .right(px(8.))
+                            .bottom(px(8.))
+                            .opacity(0.)
+                            .group_hover(group, |s| s.opacity(1.))
+                            .child(play_dot(40., theme))
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                let _ = play
+                                    .update(cx, |this, cx| this.play_album(index, 0, false, cx));
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
                     .flex()
                     .flex_col()
+                    .gap(px(2.))
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
@@ -579,17 +740,14 @@ impl LibraryWindow {
     fn render_albums(
         &self,
         theme: &Theme,
+        compact: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let data = self.library.read(cx).data();
         let header = page_header(
             "Album",
-            Some(format!(
-                "{} album · {} brani",
-                data.albums.len(),
-                data.tracks.len()
-            )),
+            Some(thousands(data.albums.len())),
             false,
             theme,
             cx,
@@ -603,7 +761,7 @@ impl LibraryWindow {
                 .child(self.empty_state(theme, cx))
                 .into_any_element();
         }
-        let (columns, card) = Self::grid_columns(window);
+        let (columns, card) = Self::grid_columns(window, compact);
         let rows = data.albums.len().div_ceil(columns);
         let this = cx.entity().downgrade();
         let theme = *theme;
@@ -621,7 +779,7 @@ impl LibraryWindow {
                             let end = (start + columns).min(data.albums.len());
                             div()
                                 .px(px(CONTENT_PAD))
-                                .pb(px(CARD_GAP))
+                                .pb(px(22.))
                                 .flex()
                                 .gap(px(CARD_GAP))
                                 .children((start..end).map(|i| {
@@ -636,20 +794,49 @@ impl LibraryWindow {
             .into_any_element()
     }
 
-    fn render_album(&self, index: usize, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_album(
+        &self,
+        index: usize,
+        theme: &Theme,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let data = self.library.read(cx).data();
         let Some(album) = data.albums.get(index).cloned() else {
             return div().into_any_element();
         };
         let playing = self.playback.read(cx).current_path().map(Path::to_path_buf);
         let minutes = album.duration.as_secs().div_ceil(60);
+        let songs = album.tracks.len();
         let summary = format!(
-            "{} · {} brani · {} min",
+            "{} · {} {} · {} min",
             album.artist,
-            album.tracks.len(),
+            songs,
+            if songs == 1 { "brano" } else { "brani" },
             minutes
         );
-        let can_go_back = !self.history.is_empty();
+        let pill =
+            |id: &'static str, icon_name: &'static str, label: &'static str, accent: bool| {
+                div()
+                    .id(id)
+                    .h(px(36.))
+                    .px(px(18.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded_full()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .cursor_pointer()
+                    .when(accent, |d| d.bg(theme.accent).text_color(theme.on_accent))
+                    .when(!accent, |d| d.bg(theme.field).hover(|d| d.bg(theme.hover)))
+                    .child(icon(
+                        icon_name,
+                        14.,
+                        if accent { theme.on_accent } else { theme.text },
+                    ))
+                    .child(label)
+            };
+        let this = cx.entity().downgrade();
         div()
             .id("album-page")
             .flex_1()
@@ -658,22 +845,9 @@ impl LibraryWindow {
             .child(
                 div()
                     .px(px(CONTENT_PAD))
-                    .pt(px(if cfg!(target_os = "macos") { 34. } else { 22. }))
-                    .when(can_go_back, |d| {
-                        d.child(
-                            div()
-                                .id("back")
-                                .mb(px(14.))
-                                .size(px(30.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_full()
-                                .bg(theme.hover)
-                                .cursor_pointer()
-                                .child(icon("back", 16., theme.text))
-                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.back(cx))),
-                        )
+                    .pt(px(22.))
+                    .when(!self.history.is_empty(), |d| {
+                        d.child(div().mb(px(14.)).child(back_button(theme, cx)))
                     })
                     .child(
                         div()
@@ -708,20 +882,7 @@ impl LibraryWindow {
                                             .flex()
                                             .gap(px(10.))
                                             .child(
-                                                div()
-                                                    .id("album-play")
-                                                    .h(px(36.))
-                                                    .px(px(18.))
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(8.))
-                                                    .rounded_full()
-                                                    .bg(theme.accent)
-                                                    .text_color(theme.on_accent)
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .cursor_pointer()
-                                                    .child(icon("play", 14., theme.on_accent))
-                                                    .child("Riproduci")
+                                                pill("album-play", "play", "Riproduci", true)
                                                     .on_click(cx.listener(
                                                         move |this, _: &ClickEvent, _, cx| {
                                                             this.play_album(index, 0, false, cx)
@@ -729,19 +890,7 @@ impl LibraryWindow {
                                                     )),
                                             )
                                             .child(
-                                                div()
-                                                    .id("album-shuffle")
-                                                    .h(px(36.))
-                                                    .px(px(18.))
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(8.))
-                                                    .rounded_full()
-                                                    .bg(theme.hover)
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .cursor_pointer()
-                                                    .child(icon("shuffle", 14., theme.text))
-                                                    .child("Casuale")
+                                                pill("album-shuffle", "shuffle", "Casuale", false)
                                                     .on_click(cx.listener(
                                                         move |this, _: &ClickEvent, _, cx| {
                                                             this.play_album(index, 0, true, cx)
@@ -755,29 +904,34 @@ impl LibraryWindow {
             .child(
                 div()
                     .px(px(CONTENT_PAD - 10.))
-                    .pt(px(22.))
+                    .pt(px(24.))
                     .pb(px(24.))
+                    .child(table_header(false, compact, theme))
                     .children(album.tracks.iter().enumerate().map(|(position, &t)| {
                         let track = &data.tracks[t];
-                        let is_playing = playing.as_deref() == Some(track.path.as_path());
                         let number = track
                             .track_no
                             .map(|n| n.to_string())
                             .unwrap_or_else(|| (position + 1).to_string());
+                        let this = this.clone();
                         track_row(
-                            ("album-track", t),
-                            number,
-                            track.title.clone(),
-                            None,
-                            track.duration.map(format_time),
-                            is_playing,
+                            TrackRow {
+                                key: t,
+                                number,
+                                title: track.title.clone(),
+                                artist: track.artist.clone(),
+                                album: None,
+                                cover: None,
+                                duration: track.duration.map(format_time),
+                                playing: playing.as_deref() == Some(track.path.as_path()),
+                            },
+                            compact,
                             theme,
                         )
-                        .on_click(cx.listener(
-                            move |this, _: &ClickEvent, _, cx| {
-                                this.play_album(index, position, false, cx);
-                            },
-                        ))
+                        .on_click(move |_, _, cx| {
+                            let _ = this
+                                .update(cx, |this, cx| this.play_album(index, position, false, cx));
+                        })
                     })),
             )
             .into_any_element()
@@ -787,7 +941,7 @@ impl LibraryWindow {
         let data = self.library.read(cx).data();
         let header = page_header(
             "Artisti",
-            Some(format!("{} artisti", data.artists.len())),
+            Some(thousands(data.artists.len())),
             false,
             theme,
             cx,
@@ -824,7 +978,7 @@ impl LibraryWindow {
                                     .flex()
                                     .items_center()
                                     .gap(px(14.))
-                                    .rounded_md()
+                                    .rounded(px(8.))
                                     .cursor_pointer()
                                     .hover(|d| d.bg(theme.hover))
                                     .child(cover(artist.cover.as_deref(), Some(44.), 22., &theme))
@@ -867,6 +1021,7 @@ impl LibraryWindow {
         &self,
         index: usize,
         theme: &Theme,
+        compact: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -874,7 +1029,7 @@ impl LibraryWindow {
         let Some(artist) = data.artists.get(index).cloned() else {
             return div().into_any_element();
         };
-        let (_, card) = Self::grid_columns(window);
+        let (_, card) = Self::grid_columns(window, compact);
         let this = cx.entity().downgrade();
         div()
             .id("artist-page")
@@ -909,11 +1064,11 @@ impl LibraryWindow {
             .into_any_element()
     }
 
-    fn render_tracks(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tracks(&self, theme: &Theme, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let data = self.library.read(cx).data();
         let header = page_header(
             "Brani",
-            Some(format!("{} brani", data.tracks.len())),
+            Some(thousands(data.tracks.len())),
             false,
             theme,
             cx,
@@ -937,20 +1092,30 @@ impl LibraryWindow {
             .flex_col()
             .child(header)
             .child(
+                div()
+                    .px(px(CONTENT_PAD - 10.))
+                    .child(table_header(true, compact, &theme)),
+            )
+            .child(
                 uniform_list("tracks", data.tracks.len(), move |range, _, _| {
                     range
                         .map(|i| {
                             let track = &data.tracks[i];
                             let this = this.clone();
-                            let is_playing = playing.as_deref() == Some(track.path.as_path());
+                            let album = &data.albums[track.album_index];
                             div().px(px(CONTENT_PAD - 10.)).child(
                                 track_row(
-                                    ("track", i),
-                                    (i + 1).to_string(),
-                                    track.title.clone(),
-                                    Some(format!("{} · {}", track.artist, track.album)),
-                                    track.duration.map(format_time),
-                                    is_playing,
+                                    TrackRow {
+                                        key: i,
+                                        number: (i + 1).to_string(),
+                                        title: track.title.clone(),
+                                        artist: track.artist.clone(),
+                                        album: Some(track.album.clone()),
+                                        cover: Some(album.cover.clone()),
+                                        duration: track.duration.map(format_time),
+                                        playing: playing.as_deref() == Some(track.path.as_path()),
+                                    },
+                                    compact,
                                     &theme,
                                 )
                                 .on_click(move |_, _, cx| {
@@ -965,265 +1130,179 @@ impl LibraryWindow {
             )
             .into_any_element()
     }
-
-    fn render_settings(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let value = self.settings.read(cx).value.clone();
-        let header = page_header("Impostazioni", None, false, theme, cx);
-        let card = || {
-            div()
-                .p(px(16.))
-                .rounded_lg()
-                .bg(theme.surface)
-                .border_1()
-                .border_color(theme.border)
-                .flex()
-                .flex_col()
-                .gap(px(10.))
-        };
-        let heading = |text: &'static str| {
-            div()
-                .text_size(px(14.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(text)
-        };
-        let hint =
-            |text: &'static str| div().text_size(px(12.)).text_color(theme.muted).child(text);
-        let button = |id: &'static str, icon_name: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .h(px(30.))
-                .px(px(12.))
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .rounded_md()
-                .bg(theme.hover)
-                .cursor_pointer()
-                .child(icon(icon_name, 14., theme.text))
-                .child(label)
-        };
-        let segment = |id: &'static str, label: &'static str, view: MiniView| {
-            let active = value.mini_view == view;
-            div()
-                .id(id)
-                .h(px(30.))
-                .px(px(14.))
-                .flex()
-                .items_center()
-                .rounded_md()
-                .cursor_pointer()
-                .when(active, |d| {
-                    d.bg(theme.accent)
-                        .text_color(theme.on_accent)
-                        .font_weight(FontWeight::SEMIBOLD)
-                })
-                .when(!active, |d| d.bg(theme.hover))
-                .child(label)
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.settings
-                        .update(cx, |s, cx| s.update(cx, |v| v.mini_view = view));
-                }))
-        };
-        let on_top = value.always_on_top;
-
-        div()
-            .id("settings-page")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .child(header)
-            .child(
-                div()
-                    .px(px(CONTENT_PAD))
-                    .pb(px(28.))
-                    .max_w(px(680.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(16.))
-                    .child(
-                        card()
-                            .child(heading("Cartelle della musica"))
-                            .child(hint(
-                                "LumiFi legge i brani da queste cartelle e dalle loro sottocartelle.",
-                            ))
-                            .children(value.folders.iter().enumerate().map(|(i, folder)| {
-                                div()
-                                    .h(px(34.))
-                                    .px(px(10.))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(10.))
-                                    .rounded_md()
-                                    .bg(theme.hover)
-                                    .child(icon("folder", 15., theme.muted))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .child(folder.display().to_string()),
-                                    )
-                                    .child(
-                                        div()
-                                            .id(("remove-folder", i))
-                                            .size(px(24.))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded_full()
-                                            .cursor_pointer()
-                                            .hover(|d| d.bg(theme.hover))
-                                            .child(icon("close", 12., theme.muted))
-                                            .on_click(cx.listener(
-                                                move |this, _: &ClickEvent, _, cx| {
-                                                    this.remove_folder(i, cx)
-                                                },
-                                            )),
-                                    )
-                            }))
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap(px(8.))
-                                    .child(
-                                        button("add-folder", "plus", "Aggiungi cartella…").on_click(
-                                            cx.listener(|this, _: &ClickEvent, _, cx| {
-                                                this.add_folder(cx)
-                                            }),
-                                        ),
-                                    )
-                                    .child(button("rescan", "refresh", "Aggiorna libreria").on_click(
-                                        cx.listener(|this, _: &ClickEvent, _, cx| this.rescan(cx)),
-                                    )),
-                            ),
-                    )
-                    .child(
-                        card()
-                            .child(heading("Mini player"))
-                            .child(hint("Come il mini player mostra l'avanzamento del brano."))
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap(px(8.))
-                                    .child(segment("view-a", "A · Barra", MiniView::A))
-                                    .child(segment("view-b", "B · Forma d'onda", MiniView::B)),
-                            )
-                            .child(
-                                div()
-                                    .id("on-top")
-                                    .mt(px(4.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .cursor_pointer()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .child("Sempre in primo piano")
-                                            .child(hint("Il mini player resta sopra le altre finestre.")),
-                                    )
-                                    .child(switch(on_top, theme))
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                        this.settings.update(cx, |s, cx| {
-                                            s.update(cx, |v| v.always_on_top = !v.always_on_top)
-                                        });
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(theme.muted)
-                            .child(format!("LumiFi {}", env!("CARGO_PKG_VERSION"))),
-                    ),
-            )
-            .into_any_element()
-    }
 }
 
-/// An on/off switch drawn in the accent colour when on.
-fn switch(on: bool, theme: &Theme) -> impl IntoElement {
-    div()
-        .w(px(38.))
-        .h(px(22.))
-        .flex_none()
-        .rounded_full()
-        .p(px(3.))
-        .flex()
-        .when(on, |d| d.bg(theme.accent).justify_end())
-        .when(!on, |d| d.bg(theme.track))
-        .child(div().size(px(16.)).rounded_full().bg(gpui::rgb(0xffffff)))
-}
-
-/// One row of a track list: number, title (and artist), length.
-fn track_row(
-    id: impl Into<gpui::ElementId>,
+/// What one row of a track list shows.
+struct TrackRow {
+    key: usize,
     number: String,
     title: SharedString,
-    detail: Option<String>,
+    artist: SharedString,
+    /// The album column (the full track list); `None` on an album's own page.
+    album: Option<SharedString>,
+    /// A small cover before the title (the full track list).
+    cover: Option<Option<std::path::PathBuf>>,
     duration: Option<String>,
     playing: bool,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
+}
+
+const NUMBER_WIDTH: f32 = 32.0;
+const DURATION_WIDTH: f32 = 56.0;
+
+/// "# · Titolo · Album · ⏱" over a track list, with a line under it.
+fn table_header(with_album: bool, compact: bool, theme: &Theme) -> impl IntoElement {
     div()
-        .id(id)
-        .h(px(ROW_HEIGHT + if detail.is_some() { 8. } else { 0. }))
+        .h(px(34.))
+        .px(px(10.))
+        .mb(px(6.))
+        .flex()
+        .items_center()
+        .gap(px(14.))
+        .border_b_1()
+        .border_color(theme.hairline)
+        .text_size(px(12.))
+        .text_color(theme.muted)
+        .child(
+            div()
+                .w(px(NUMBER_WIDTH))
+                .flex_none()
+                .flex()
+                .justify_end()
+                .child("#"),
+        )
+        .child(div().flex_1().min_w_0().child("Titolo"))
+        .when(with_album && !compact, |d| {
+            d.child(div().flex_1().min_w_0().child("Album"))
+        })
+        .child(
+            div()
+                .w(px(DURATION_WIDTH))
+                .flex_none()
+                .flex()
+                .justify_end()
+                .child(icon("clock", 14., theme.muted)),
+        )
+}
+
+/// One row of a track list. Under the mouse the number turns into ▶; the playing track shows
+/// the waves in the accent colour.
+fn track_row(row: TrackRow, compact: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let group = SharedString::from(format!("track-row-{}", row.key));
+    let accent = row.playing;
+    div()
+        .id(("track-row", row.key))
+        .group(group.clone())
+        .h(px(ROW_HEIGHT))
         .px(px(10.))
         .flex()
         .items_center()
         .gap(px(14.))
-        .rounded_md()
+        .rounded(px(6.))
         .cursor_pointer()
         .hover(|d| d.bg(theme.hover))
         .child(
             div()
-                .w(px(28.))
+                .w(px(NUMBER_WIDTH))
+                .h_full()
                 .flex_none()
-                .flex()
-                .justify_end()
-                .text_color(if playing { theme.accent } else { theme.muted })
-                .when(playing, |d| d.child(icon("waves", 18., theme.accent)))
-                .when(!playing, |d| d.child(number)),
+                .relative()
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .text_color(theme.muted)
+                        .group_hover(group.clone(), |s| s.opacity(0.))
+                        .map(|d| {
+                            if accent {
+                                d.child(icon("waves", 18., theme.accent))
+                            } else {
+                                d.child(row.number)
+                            }
+                        }),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .opacity(0.)
+                        .group_hover(group, |s| s.opacity(1.))
+                        .child(icon("play", 13., theme.text)),
+                ),
         )
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .flex()
-                .flex_col()
+                .items_center()
+                .gap(px(12.))
+                .when_some(row.cover, |d, path| {
+                    d.child(cover(path.as_deref(), Some(36.), 4., theme))
+                })
                 .child(
                     div()
-                        .truncate()
-                        .when(playing, |d| {
-                            d.text_color(theme.accent).font_weight(FontWeight::SEMIBOLD)
-                        })
-                        .child(title),
-                )
-                .when_some(detail, |d, detail| {
-                    d.child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(theme.muted)
-                            .truncate()
-                            .child(detail),
-                    )
-                }),
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .truncate()
+                                .when(accent, |d| {
+                                    d.text_color(theme.accent_text)
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                })
+                                .child(row.title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(theme.muted)
+                                .truncate()
+                                .child(row.artist),
+                        ),
+                ),
         )
+        .when_some(row.album.filter(|_| !compact), |d, album| {
+            d.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(12.5))
+                    .text_color(theme.muted)
+                    .truncate()
+                    .child(album),
+            )
+        })
         .child(
             div()
+                .w(px(DURATION_WIDTH))
                 .flex_none()
+                .flex()
+                .justify_end()
                 .text_color(theme.muted)
-                .text_size(px(12.))
-                .child(duration.unwrap_or_default()),
+                .text_size(px(12.5))
+                .child(row.duration.unwrap_or_default()),
         )
 }
 
 // Player bar --------------------------------------------------------------------------------
 
 impl LibraryWindow {
-    fn render_player_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_player_bar(
+        &self,
+        theme: &Theme,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let playback = self.playback.read(cx);
+        let show_quality = self.settings.read(cx).value.show_quality;
         let now = playback.now();
         let total = now.and_then(|n| n.duration);
         let fraction = match self.drag {
@@ -1237,27 +1316,45 @@ impl LibraryWindow {
         let paused = playback.is_paused();
         let volume = playback.effective_volume();
         let shuffle_color = if playback.is_shuffled() {
-            theme.accent
+            theme.accent_text
         } else {
             theme.muted
         };
         let (repeat_icon, repeat_color) = match playback.repeat() {
             Repeat::Off => ("repeat", theme.muted),
-            Repeat::All => ("repeat", theme.accent),
-            Repeat::One => ("repeat-one", theme.accent),
+            Repeat::All => ("repeat", theme.accent_text),
+            Repeat::One => ("repeat-one", theme.accent_text),
         };
-        let (title, artist, cover_image) = match now {
+        let (title, artist, cover_image, quality) = match now {
             Some(n) => (
                 n.title.clone(),
                 n.artist.clone().unwrap_or_else(|| n.subtitle.clone()),
                 n.cover.clone(),
+                Some(n.quality.clone()),
             ),
-            None => ("Nessun brano".into(), "".into(), None),
+            None => ("Nessun brano".into(), "".into(), None, None),
         };
         let error = playback.error();
         let has_track = now.is_some();
         let seek = cx.entity().downgrade();
         let vol = cx.entity().downgrade();
+        let control = |id: &'static str,
+                       name: &'static str,
+                       size: f32,
+                       color,
+                       action: Box<dyn gpui::Action>| {
+            div()
+                .id(id)
+                .size(px(32.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .cursor_pointer()
+                .hover(|d| d.bg(theme.hover))
+                .child(icon(name, size, color))
+                .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
+        };
 
         div()
             .h(px(PLAYER_BAR_HEIGHT))
@@ -1265,10 +1362,10 @@ impl LibraryWindow {
             .px(px(16.))
             .flex()
             .items_center()
-            .gap(px(16.))
-            .bg(theme.sidebar)
+            .gap(px(20.))
+            .bg(theme.bar)
             .border_t_1()
-            .border_color(theme.border)
+            .border_color(theme.hairline)
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
                 let dy = f32::from(event.delta.pixel_delta(window.line_height()).y);
                 this.playback
@@ -1278,7 +1375,7 @@ impl LibraryWindow {
             .child(
                 div()
                     .id("now-playing")
-                    .w(gpui::relative(0.28))
+                    .w(gpui::relative(if compact { 0.32 } else { 0.28 }))
                     .min_w_0()
                     .flex()
                     .items_center()
@@ -1286,19 +1383,20 @@ impl LibraryWindow {
                     .when(has_track, |d| d.cursor_pointer())
                     .child(match cover_image {
                         Some(image) => div()
-                            .size(px(54.))
+                            .size(px(50.))
                             .flex_none()
                             .rounded(px(6.))
                             .overflow_hidden()
                             .child(img(image).size_full().object_fit(ObjectFit::Cover))
                             .into_any_element(),
-                        None => cover(None, Some(54.), 6., theme),
+                        None => cover(None, Some(50.), 6., theme),
                     })
                     .child(
                         div()
                             .min_w_0()
                             .flex()
                             .flex_col()
+                            .gap(px(2.))
                             .child(
                                 div()
                                     .font_weight(FontWeight::SEMIBOLD)
@@ -1314,7 +1412,16 @@ impl LibraryWindow {
                                         Some(error) => error,
                                         None => artist,
                                     }),
-                            ),
+                            )
+                            .when_some(quality.filter(|_| show_quality), |d, q| {
+                                d.child(
+                                    div()
+                                        .text_size(px(10.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme.accent_text)
+                                        .child(q),
+                                )
+                            }),
                     )
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         if let Some(album) = this.playing_album(cx) {
@@ -1335,22 +1442,20 @@ impl LibraryWindow {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(14.))
-                            .child(icon_button(
+                            .gap(px(10.))
+                            .child(control(
                                 "bar-shuffle",
                                 "shuffle",
-                                16.,
-                                30.,
+                                15.,
                                 shuffle_color,
-                                ToggleShuffle,
+                                Box::new(ToggleShuffle),
                             ))
-                            .child(icon_button(
+                            .child(control(
                                 "bar-previous",
                                 "previous",
-                                18.,
-                                30.,
+                                17.,
                                 theme.text,
-                                Previous,
+                                Box::new(Previous),
                             ))
                             .child(
                                 div()
@@ -1371,20 +1476,19 @@ impl LibraryWindow {
                                         window.dispatch_action(Box::new(TogglePlay), cx)
                                     }),
                             )
-                            .child(icon_button("bar-next", "next", 18., 30., theme.text, Next))
-                            .child(icon_button(
+                            .child(control("bar-next", "next", 17., theme.text, Box::new(Next)))
+                            .child(control(
                                 "bar-repeat",
                                 repeat_icon,
-                                16.,
-                                30.,
+                                15.,
                                 repeat_color,
-                                CycleRepeat,
+                                Box::new(CycleRepeat),
                             )),
                     )
                     .child(
                         div()
                             .w_full()
-                            .max_w(px(620.))
+                            .max_w(px(520.))
                             .flex()
                             .items_center()
                             .gap(px(10.))
@@ -1392,72 +1496,79 @@ impl LibraryWindow {
                             .text_color(theme.muted)
                             .child(
                                 div()
-                                    .w(px(40.))
+                                    .w(px(36.))
                                     .flex()
                                     .justify_end()
                                     .child(format_time(position)),
                             )
-                            .child(div().flex_1().child(slider(
-                                "bar-progress",
-                                matches!(self.drag, Drag::Seek(_)),
-                                div().h(px(14.)).flex().items_center().child(bar(
-                                    fraction,
-                                    4.,
-                                    theme.track,
-                                    theme.text,
+                            .child(
+                                div().flex_1().child(slider(
+                                    "bar-progress",
+                                    matches!(self.drag, Drag::Seek(_)),
+                                    div()
+                                        .h(px(16.))
+                                        .flex()
+                                        .items_center()
+                                        .child(knob_bar(fraction, theme)),
+                                    move |event, _, cx| {
+                                        let _ =
+                                            seek.update(cx, |this, cx| this.slide_seek(event, cx));
+                                    },
                                 )),
-                                move |event, _, cx| {
-                                    let _ = seek.update(cx, |this, cx| this.slide_seek(event, cx));
-                                },
-                            )))
+                            )
                             .child(
                                 div()
-                                    .w(px(40.))
+                                    .w(px(36.))
                                     .child(total.map(format_time).unwrap_or_else(|| "–:––".into())),
                             ),
                     ),
             )
-            // Volume and the mini player.
+            // Volume.
             .child(
                 div()
-                    .w(gpui::relative(0.28))
+                    .w(gpui::relative(if compact { 0.2 } else { 0.28 }))
                     .flex()
                     .items_center()
                     .justify_end()
-                    .gap(px(10.))
-                    .child(icon_button(
+                    .gap(px(6.))
+                    .child(control(
                         "bar-mute",
                         if volume == 0.0 {
                             "volume-off"
                         } else {
                             "volume"
                         },
-                        16.,
-                        28.,
-                        theme.muted,
-                        ToggleMute,
-                    ))
-                    .child(div().w(px(110.)).child(slider(
-                        "bar-volume",
-                        self.drag == Drag::Volume,
-                        div().h(px(14.)).flex().items_center().child(bar(
-                            volume,
-                            4.,
-                            theme.track,
-                            theme.text,
-                        )),
-                        move |event, _, cx| {
-                            let _ = vol.update(cx, |this, cx| this.slide_volume(event, cx));
-                        },
-                    )))
-                    .child(icon_button(
-                        "bar-mini",
-                        "minimize",
                         15.,
-                        28.,
                         theme.muted,
-                        ToggleLibrary,
-                    )),
+                        Box::new(ToggleMute),
+                    ))
+                    .child(
+                        div().w(px(96.)).child(slider(
+                            "bar-volume",
+                            self.drag == Drag::Volume,
+                            div()
+                                .h(px(16.))
+                                .flex()
+                                .items_center()
+                                .child(knob_bar(volume, theme)),
+                            move |event, _, cx| {
+                                let _ = vol.update(cx, |this, cx| this.slide_volume(event, cx));
+                            },
+                        )),
+                    ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::thousands;
+
+    #[test]
+    fn thousands_use_dots() {
+        assert_eq!(thousands(7), "7");
+        assert_eq!(thousands(646), "646");
+        assert_eq!(thousands(2418), "2.418");
+        assert_eq!(thousands(1_234_567), "1.234.567");
     }
 }

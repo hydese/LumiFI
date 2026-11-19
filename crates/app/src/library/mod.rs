@@ -73,8 +73,40 @@ fn sort_key(text: &str) -> String {
         .unwrap_or(lower)
 }
 
+/// Letters and digits only, lower case: "AVAION/Sofiya Nzau" and "AVAION, Sofiya Nzau" match.
+fn loose(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Two files are the same song when title, artist and length (to the second) match.
+fn same_song_key(row: &TrackRow) -> Option<(String, String, u64)> {
+    let seconds = (row.duration_ms? + 500) / 1000;
+    let title = row.title.clone().or_else(|| {
+        row.path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+    })?;
+    let artist = row.artist.clone().unwrap_or_default();
+    Some((loose(&title), loose(&artist), seconds))
+}
+
+/// Keeps one file per song (the first by path, so the choice is stable between scans).
+fn without_duplicates(mut rows: Vec<TrackRow>) -> Vec<TrackRow> {
+    rows.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut seen = std::collections::HashSet::new();
+    rows.retain(|row| match same_song_key(row) {
+        Some(key) => seen.insert(key),
+        None => true,
+    });
+    rows
+}
+
 impl LibraryData {
     pub fn build(rows: Vec<TrackRow>) -> Self {
+        let rows = without_duplicates(rows);
         struct Draft {
             title: String,
             artist: String,
@@ -303,6 +335,37 @@ mod tests {
             duration_ms: Some(60_000),
             cover: None,
         }
+    }
+
+    #[test]
+    fn hides_duplicate_songs() {
+        let mut a = row(
+            "/m/b/kidz.mp3",
+            Some("AVAION/Sofiya Nzau"),
+            Some("Kidz"),
+            Some(1),
+        );
+        a.title = Some("Kidz".into());
+        let mut b = row(
+            "/m/a/kidz (1).mp3",
+            Some("AVAION, Sofiya Nzau"),
+            Some("Kidz"),
+            Some(1),
+        );
+        b.title = Some("Kidz".into());
+        let mut c = row(
+            "/m/a/kidz extended.mp3",
+            Some("AVAION"),
+            Some("Kidz"),
+            Some(2),
+        );
+        c.title = Some("Kidz (Extended Mix)".into());
+        let data = LibraryData::build(vec![a, b, c]);
+        assert_eq!(
+            data.tracks.len(),
+            2,
+            "the second Kidz is hidden, the extended mix stays"
+        );
     }
 
     #[test]

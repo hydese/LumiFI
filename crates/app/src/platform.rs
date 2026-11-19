@@ -1,5 +1,5 @@
 //! The few things gpui 0.2 does not do for a borderless mini player: keeping it above other
-//! windows on Windows, and dragging it by its background on macOS. Each is one system call;
+//! windows, and dragging it by its background. Each is one system call;
 //! this is the only module allowed to use `unsafe`.
 #![allow(unsafe_code)]
 // The objc 0.2 macros test a `feature` cfg that this crate does not declare.
@@ -86,10 +86,28 @@ pub fn start_drag(window: &Window) {
             }
         }
     }
-    // Windows moves the window through the drag area (WindowControlArea::Drag); Wayland and X11
-    // ask the compositor.
+    // Windows: hand the mouse to the system's own "move window" loop. The message is posted,
+    // not sent, so the loop starts after gpui has finished handling this click.
+    #[cfg(target_os = "windows")]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, SC_MOVE, WM_SYSCOMMAND};
+        /// SC_MOVE combined with HTCAPTION: move with the mouse, as if dragging the title bar.
+        const DRAG_MOVE: usize = SC_MOVE as usize | 0x0002;
+        let Ok(handle) = HasWindowHandle::window_handle(window) else {
+            return;
+        };
+        if let RawWindowHandle::Win32(win) = handle.as_raw() {
+            let hwnd = win.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+            // SAFETY: `hwnd` is this window's live handle; both calls only queue work for it.
+            unsafe {
+                ReleaseCapture();
+                PostMessageW(hwnd, WM_SYSCOMMAND, DRAG_MOVE, 0);
+            }
+        }
+    }
+    // Wayland and X11 ask the compositor.
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     window.start_window_move();
-    #[cfg(target_os = "windows")]
-    let _ = window;
 }

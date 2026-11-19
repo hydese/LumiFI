@@ -9,7 +9,8 @@ use std::time::Duration;
 use gpui::{App, AppContext, Context, Entity, Global, Image, ImageFormat, SharedString, Task};
 use lumifi_engine::{Artwork, Player, analysis};
 
-use crate::queue::{Queue, Repeat, collect_audio};
+use crate::queue::{Queue, QueueState, Repeat, collect_audio};
+use crate::settings::{GlobalSettings, Paths};
 
 /// How many peaks the waveform view draws.
 pub const WAVE_BARS: usize = 56;
@@ -32,6 +33,16 @@ pub struct NowPlaying {
     pub subtitle: SharedString,
     pub cover: Option<Arc<Image>>,
     pub duration: Option<Duration>,
+    /// "FLAC · 24/96", "MP3 · 44,1 kHz".
+    pub quality: SharedString,
+}
+
+/// What was playing, saved so the next launch can pick it up again.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Session {
+    queue: QueueState,
+    position_ms: u64,
 }
 
 pub struct Playback {
@@ -45,6 +56,8 @@ pub struct Playback {
     error: Option<SharedString>,
     /// Position at the last notification, so observers redraw only when the clock moved.
     notified_position: Duration,
+    /// Position at the last session save.
+    saved_position: Duration,
     _ticker: Task<()>,
     _waveform_job: Option<Task<()>>,
 }
@@ -89,6 +102,7 @@ impl Playback {
             waveform: Vec::new(),
             error: None,
             notified_position: Duration::ZERO,
+            saved_position: Duration::ZERO,
             _ticker: ticker,
             _waveform_job: None,
         }
@@ -180,7 +194,10 @@ impl Playback {
     fn load(&mut self, path: &Path, start: Duration, play: bool, cx: &mut Context<Self>) {
         log::info!("load {} at {:?} (play: {play})", path.display(), start);
         self.player = None;
-        match Player::play_from(path, start, self.effective_volume()) {
+        let device = cx
+            .try_global::<GlobalSettings>()
+            .and_then(|s| s.0.read(cx).value.output_device.clone());
+        match Player::play_on(path, start, self.effective_volume(), device.as_deref()) {
             Ok(player) => {
                 if !play {
                     player.pause();
@@ -194,6 +211,7 @@ impl Playback {
                 self.paused = !play;
                 self.player = Some(player);
                 self.error = None;
+                self.save_session();
             }
             Err(error) => {
                 log::warn!("cannot play {}: {error}", path.display());
@@ -257,6 +275,58 @@ impl Playback {
             self.notified_position = position;
             cx.notify();
         }
+        if position.abs_diff(self.saved_position) >= Duration::from_secs(10) {
+            self.save_session();
+        }
+    }
+
+    // Sessions ----------------------------------------------------------------------------
+
+    /// Saves the queue and position, so the next launch can resume. Cheap: a small JSON file.
+    pub fn save_session(&mut self) {
+        if self.now.is_none() {
+            return;
+        }
+        let position = self.position();
+        self.saved_position = position;
+        let session = Session {
+            queue: self.queue.state(),
+            position_ms: position.as_millis() as u64,
+        };
+        let path = Paths::session_file();
+        let _ = std::fs::create_dir_all(Paths::data_dir());
+        if let Ok(bytes) = serde_json::to_vec(&session)
+            && let Err(error) = std::fs::write(&path, bytes)
+        {
+            log::warn!("cannot save the session: {error}");
+        }
+    }
+
+    /// Reopens the last track, paused where it was.
+    pub fn resume_session(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = std::fs::read(Paths::session_file())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Session>(&bytes).ok())
+        else {
+            return;
+        };
+        if !self.queue.restore(session.queue) {
+            return;
+        }
+        if let Some(path) = self.queue.current().map(Path::to_path_buf)
+            && path.exists()
+        {
+            self.load(&path, Duration::from_millis(session.position_ms), false, cx);
+        }
+    }
+
+    /// Reopens the current track on the output device now chosen in the settings.
+    pub fn reload_output(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.current_path().map(Path::to_path_buf) {
+            let position = self.position();
+            let play = !self.paused;
+            self.load(&path, position, play, cx);
+        }
     }
 
     // Controls ----------------------------------------------------------------------------
@@ -276,6 +346,7 @@ impl Playback {
             }
             self.paused = !self.paused;
         }
+        self.save_session();
         cx.notify();
     }
 
@@ -383,6 +454,22 @@ fn describe(path: &Path, player: &Player) -> NowPlaying {
         subtitle: subtitle.into(),
         cover: player.artwork().and_then(cover_image),
         duration: player.info().duration(),
+        quality: quality(player.info()).into(),
+    }
+}
+
+/// A short description of the file's format: "FLAC · 24/96", "MP3 · 44,1 kHz".
+fn quality(info: &lumifi_engine::TrackInfo) -> String {
+    let codec = info.codec.to_uppercase();
+    let khz = info.sample_rate as f32 / 1000.0;
+    let rate = if khz.fract() == 0.0 {
+        format!("{khz:.0}")
+    } else {
+        format!("{khz:.1}").replace('.', ",")
+    };
+    match info.bits_per_sample {
+        Some(bits) => format!("{codec} · {bits}/{rate}"),
+        None => format!("{codec} · {rate} kHz"),
     }
 }
 

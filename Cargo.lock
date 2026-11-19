@@ -3343,7 +3343,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "lumifi"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -3363,7 +3363,7 @@ dependencies = [
 
 [[package]]
 name = "lumifi-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3373,7 +3373,7 @@ dependencies = [
 
 [[package]]
 name = "lumifi-engine"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cpal",
  "hound",
