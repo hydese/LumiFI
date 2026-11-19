@@ -10,7 +10,7 @@ use gpui::{
     PathPromptOptions, Pixels, Render, ScrollWheelEvent, SharedString, StatefulInteractiveElement,
     Styled, StyledImage, Task, Window, WindowControlArea, div, img, prelude::*, px, svg,
 };
-use lumifi_engine::analysis::{self, Spectrum};
+use lumifi_engine::analysis;
 use lumifi_engine::{Artwork, Player, format_time};
 
 use crate::actions::*;
@@ -26,30 +26,19 @@ const WAVE_BARS: usize = 56;
 /// The volume pill in the top bar sits at a fixed place: these are its slider's edges.
 const VOLUME_LEFT: f32 = 10.0 + 28.0 + 6.0 + 8.0 + 14.0 + 6.0;
 const VOLUME_WIDTH: f32 = 56.0;
-const SPECTRUM_BARS: usize = 28;
-const SPECTRUM_FFT: usize = 2048;
 
-/// How the progress is drawn: plain bar, waveform or live spectrum.
+/// How the progress is drawn: plain bar or waveform.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Viz {
     A,
     B,
-    C,
 }
 
 impl Viz {
-    fn label(self) -> &'static str {
-        match self {
-            Viz::A => "A",
-            Viz::B => "B",
-            Viz::C => "C",
-        }
-    }
     fn next(self) -> Self {
         match self {
             Viz::A => Viz::B,
-            Viz::B => Viz::C,
-            Viz::C => Viz::A,
+            Viz::B => Viz::A,
         }
     }
 }
@@ -63,6 +52,15 @@ pub fn queue_opened_paths(paths: Vec<PathBuf>) {
     }
 }
 
+/// A slider being dragged with the mouse.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Drag {
+    None,
+    Volume,
+    /// Seeking: where the knob is now, from 0 to 1. The jump happens on release.
+    Seek(f32),
+}
+
 /// What the window shows about the track that is loaded.
 struct NowPlaying {
     path: PathBuf,
@@ -70,7 +68,6 @@ struct NowPlaying {
     subtitle: SharedString,
     cover: Option<Arc<Image>>,
     duration: Option<Duration>,
-    sample_rate: u32,
 }
 
 pub struct MiniPlayer {
@@ -87,12 +84,10 @@ pub struct MiniPlayer {
     /// Hides the controls a moment after the mouse leaves, so edges don't flicker.
     _hide_controls: Option<Task<()>>,
     always_on_top: bool,
+    drag: Drag,
     /// Position shown at the last redraw, to redraw only when something visible moved.
     drawn_position: Duration,
     waveform: Vec<f32>,
-    spectrum: Spectrum,
-    bars: Vec<f32>,
-    scope: Vec<f32>,
     error: Option<SharedString>,
     _ticker: Task<()>,
     _waveform_job: Option<Task<()>>,
@@ -105,7 +100,7 @@ impl MiniPlayer {
         cx.observe_window_appearance(window, |_, _, cx| cx.notify())
             .detach();
 
-        // One loop drives everything that moves: the clock, the spectrum and the next track.
+        // One loop drives everything that moves: the clock and the next track.
         let ticker = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -133,11 +128,9 @@ impl MiniPlayer {
             controls: false,
             _hide_controls: None,
             always_on_top: false,
+            drag: Drag::None,
             drawn_position: Duration::ZERO,
             waveform: Vec::new(),
-            spectrum: Spectrum::new(SPECTRUM_FFT, SPECTRUM_BARS),
-            bars: vec![0.0; SPECTRUM_BARS],
-            scope: Vec::with_capacity(SPECTRUM_FFT),
             error: None,
             _ticker: ticker,
             _waveform_job: None,
@@ -241,13 +234,6 @@ impl MiniPlayer {
         if self.paused || !self.controls {
             return;
         }
-        if self.viz == Viz::C {
-            player.take_scope(&mut self.scope, SPECTRUM_FFT);
-            let rate = self.now.as_ref().map_or(44_100, |n| n.sample_rate);
-            self.bars = self.spectrum.update(&self.scope, rate).to_vec();
-            cx.notify();
-            return;
-        }
         // Bar and waveform: a few redraws a second are enough.
         let position = player.position();
         if position.abs_diff(self.drawn_position) >= Duration::from_millis(250) {
@@ -289,6 +275,9 @@ impl MiniPlayer {
     }
 
     fn progress(&self) -> f32 {
+        if let Drag::Seek(fraction) = self.drag {
+            return fraction;
+        }
         match self.now.as_ref().and_then(|n| n.duration) {
             Some(total) if !total.is_zero() => {
                 (self.position().as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0)
@@ -414,13 +403,37 @@ impl MiniPlayer {
         self.load(&path, position, play, cx);
     }
 
-    /// A click on the progress area: `x` is the window coordinate of the click.
-    fn seek_at(&mut self, x: Pixels, cx: &mut Context<Self>) {
-        let Some(total) = self.now.as_ref().and_then(|n| n.duration) else {
-            return;
-        };
-        let fraction = ((f32::from(x) - PAD) / (SIZE - 2.0 * PAD)).clamp(0.0, 1.0);
-        self.seek_to(total.mul_f32(fraction), cx);
+    /// Where along the progress bar the window coordinate `x` falls, from 0 to 1.
+    fn progress_at(x: Pixels) -> f32 {
+        ((f32::from(x) - PAD) / (SIZE - 2.0 * PAD)).clamp(0.0, 1.0)
+    }
+
+    fn start_seek_drag(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        if self.now.as_ref().and_then(|n| n.duration).is_some() {
+            self.drag = Drag::Seek(Self::progress_at(x));
+            cx.notify();
+        }
+    }
+
+    fn drag_to(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        match self.drag {
+            Drag::None => {}
+            Drag::Volume => self.volume_at(x, cx),
+            Drag::Seek(_) => {
+                self.drag = Drag::Seek(Self::progress_at(x));
+                cx.notify();
+            }
+        }
+    }
+
+    /// The mouse button went up: a seek drag jumps now.
+    fn end_drag(&mut self, cx: &mut Context<Self>) {
+        let drag = std::mem::replace(&mut self.drag, Drag::None);
+        if let (Drag::Seek(fraction), Some(total)) =
+            (drag, self.now.as_ref().and_then(|n| n.duration))
+        {
+            self.seek_to(total.mul_f32(fraction), cx);
+        }
     }
 
     fn volume_at(&mut self, x: Pixels, cx: &mut Context<Self>) {
@@ -452,7 +465,6 @@ fn describe(path: &Path, player: &Player) -> NowPlaying {
         subtitle: subtitle.into(),
         cover: player.artwork().and_then(cover_image),
         duration: player.info().duration(),
-        sample_rate: player.info().sample_rate,
     }
 }
 
@@ -540,6 +552,21 @@ impl Render for MiniPlayer {
                 let dy = f32::from(event.delta.pixel_delta(window.line_height()).y);
                 this.set_volume(this.volume + dy / 400.0, cx);
             }))
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                if this.drag == Drag::None {
+                    return;
+                }
+                if event.dragging() {
+                    this.drag_to(event.position.x, cx);
+                } else {
+                    // Released outside the window: finish there.
+                    this.end_drag(cx);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| this.end_drag(cx)),
+            )
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 this.open_paths(paths.paths().to_vec(), cx);
             }))
@@ -556,7 +583,25 @@ impl Render for MiniPlayer {
             .on_action(cx.listener(Self::seek_back))
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::toggle_on_top))
-            .child(self.render_cover(&theme))
+            .child(self.render_cover(&theme, show_controls))
+            // At rest, a thin line along the bottom still shows how far the track has got.
+            .when(!show_controls && !empty, |root| {
+                root.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .h(px(3.))
+                        .bg(theme.track)
+                        .child(
+                            div()
+                                .h_full()
+                                .w(gpui::relative(self.progress()))
+                                .bg(theme.accent),
+                        ),
+                )
+            })
             .child(self.render_drag_strip())
             .when(show_controls, |root| {
                 root.child(self.render_top_buttons(&theme, cx))
@@ -583,7 +628,7 @@ impl Render for MiniPlayer {
 }
 
 impl MiniPlayer {
-    fn render_cover(&self, theme: &Theme) -> AnyElement {
+    fn render_cover(&self, theme: &Theme, controls: bool) -> AnyElement {
         match self.now.as_ref().and_then(|n| n.cover.clone()) {
             Some(cover) => img(cover)
                 .absolute()
@@ -593,16 +638,25 @@ impl MiniPlayer {
                 .into_any_element(),
             None => {
                 let empty = self.now.is_none();
-                // Without a cover the logo sits in the strip above the controls, smaller.
-                let logo = if empty { 84. } else { 52. };
+                // With the controls showing, the logo shrinks into the strip above them; at rest
+                // it is centred with the title and artist under it.
+                let compact = controls && !empty;
+                let resting = !controls && !empty;
+                let logo = if compact { 52. } else { 84. };
+                let (title, subtitle) = self
+                    .now
+                    .as_ref()
+                    .map(|n| (n.title.clone(), n.subtitle.clone()))
+                    .unwrap_or_default();
                 div()
                     .absolute()
                     .inset_0()
                     .flex()
                     .flex_col()
                     .items_center()
-                    .when(empty, |d| d.justify_center())
-                    .when(!empty, |d| d.pt(px(60.)))
+                    .when(!compact, |d| d.justify_center())
+                    .when(compact, |d| d.pt(px(60.)))
+                    .px(px(PAD))
                     .gap(px(10.))
                     .child(
                         div()
@@ -614,6 +668,33 @@ impl MiniPlayer {
                             .justify_center()
                             .child(icon("waves", logo, theme.on_accent)),
                     )
+                    .when(resting, |d| {
+                        d.child(
+                            div()
+                                .mt(px(6.))
+                                .w_full()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .gap(px(2.))
+                                .child(
+                                    div()
+                                        .max_w_full()
+                                        .text_size(px(14.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .truncate()
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .max_w_full()
+                                        .text_size(px(12.))
+                                        .text_color(theme.muted)
+                                        .truncate()
+                                        .child(subtitle),
+                                ),
+                        )
+                    })
                     .when(empty, |d| {
                         d.child(
                             div()
@@ -699,11 +780,6 @@ impl MiniPlayer {
                     )
                     .when(self.now.is_some(), |row| row.child(self.render_volume(cx))),
             )
-            .child(
-                chip("view")
-                    .child(format!("Vista {}", self.viz.label()))
-                    .on_click(|_, window, cx| window.dispatch_action(Box::new(CycleView), cx)),
-            )
     }
 
     /// A small pill: speaker (click to mute) and a short slider. The wheel works anywhere.
@@ -746,6 +822,7 @@ impl MiniPlayer {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            this.drag = Drag::Volume;
                             this.volume_at(event.position.x, cx)
                         }),
                     )
@@ -830,7 +907,7 @@ impl MiniPlayer {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                            this.seek_at(event.position.x, cx)
+                            this.start_seek_drag(event.position.x, cx)
                         }),
                     )
                     .child(self.render_viz(theme, progress))
@@ -924,22 +1001,6 @@ impl MiniPlayer {
                     }))
                     .into_any_element()
             }
-            Viz::C => div()
-                .h(px(22.))
-                .flex()
-                .flex_col()
-                .gap(px(3.))
-                .child(div().h(px(16.)).flex().items_end().gap(px(2.)).children(
-                    self.bars.iter().map(|level| {
-                        div()
-                            .flex_1()
-                            .h(px(1.0 + level * 15.0))
-                            .rounded_t(px(2.))
-                            .bg(theme.accent)
-                    }),
-                ))
-                .child(bar(progress, theme, 3.))
-                .into_any_element(),
         }
     }
 }

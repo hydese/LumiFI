@@ -1,11 +1,11 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, StreamTrait};
-use rtrb::{Consumer, RingBuffer};
+use rtrb::RingBuffer;
 
 use crate::output::{self, MAX_CHANNELS};
 use crate::{Artwork, EngineError, Result, Source, TrackInfo, TrackTags};
@@ -14,8 +14,6 @@ use crate::{Artwork, EngineError, Result, Source, TrackInfo, TrackTags};
 const BUFFER_SECONDS: usize = 2;
 /// How long the decoder waits when the buffer is full.
 const DECODER_IDLE: Duration = Duration::from_millis(5);
-/// How many mono samples the scope keeps for the visualiser (about 0.1 s at 44.1 kHz).
-const SCOPE_CAPACITY: usize = 8192;
 
 /// State shared between the caller, the decoder thread and the audio callback.
 struct Shared {
@@ -46,7 +44,6 @@ pub struct Player {
     stream: cpal::Stream,
     decoder: Option<JoinHandle<Result<()>>>,
     start: Duration,
-    scope: Mutex<Consumer<f32>>,
 }
 
 impl Player {
@@ -124,7 +121,6 @@ impl Player {
             })?;
 
         let callback_shared = Arc::clone(&shared);
-        let (mut scope_in, scope_out) = RingBuffer::<f32>::new(SCOPE_CAPACITY);
         let mut frame = [0.0_f32; MAX_CHANNELS];
         let stream = device.build_output_stream(
             config.stream,
@@ -148,10 +144,6 @@ impl Player {
                         *slot = consumer.pop().unwrap_or(0.0);
                     }
                     output::map_frame(&frame[..source_channels], out);
-                    // A mono copy for the visualiser; dropped when nobody reads it.
-                    let mono =
-                        frame[..source_channels].iter().sum::<f32>() / source_channels as f32;
-                    let _ = scope_in.push(mono);
                     // At full volume the samples are left exactly as decoded.
                     if volume != 1.0 {
                         out.iter_mut().for_each(|sample| *sample *= volume);
@@ -174,23 +166,7 @@ impl Player {
             stream,
             decoder: Some(decoder),
             start,
-            scope: Mutex::new(scope_out),
         })
-    }
-
-    /// Moves the newest decoded samples (mono, before volume) into `out`, oldest first, keeping
-    /// at most `max`. Used by the spectrum view.
-    pub fn take_scope(&self, out: &mut Vec<f32>, max: usize) {
-        out.clear();
-        if let Ok(mut scope) = self.scope.lock() {
-            let available = scope.slots();
-            let skip = available.saturating_sub(max);
-            if let Ok(chunk) = scope.read_chunk(available) {
-                let (first, second) = chunk.as_slices();
-                out.extend(first.iter().chain(second).skip(skip).copied());
-                chunk.commit_all();
-            }
-        }
     }
 
     /// The track being played.

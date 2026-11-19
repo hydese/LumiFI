@@ -3338,7 +3338,6 @@ dependencies = [
  "hound",
  "log",
  "rtrb",
- "rustfft",
  "symphonia",
  "symphonia-opus",
  "thiserror 2.0.21",

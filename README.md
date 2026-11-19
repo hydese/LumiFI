@@ -12,7 +12,7 @@ La tua musica, come è stata registrata.
 
 > [!NOTE]
 > LumiFi è all'inizio. Oggi c'è il **mini player**: suona la tua musica locale, con copertina,
-> coda, casuale, ripeti, volume e tre visualizzazioni. La libreria completa, l'equalizzatore e
+> coda, casuale, ripeti, volume e due visualizzazioni. La libreria completa, l'equalizzatore e
 > Spotify arrivano nelle prossime versioni.
 
 ## L'idea
@@ -50,7 +50,7 @@ cargo run --release -p lumifi -- ~/Music/Album     # parte subito con una cartel
 | ↑ / ↓ e rotella | Volume |
 | M | Silenzia |
 | S / R | Casuale / ripeti (tutto, un brano) |
-| V | Vista A (barra), B (forma d'onda), C (spettro) |
+| V | Vista A (barra) o B (forma d'onda) |
 | ⌘O / Ctrl+O | Apri file o cartelle |
 
 La finestra si sposta trascinandola dalla parte alta. I comandi compaiono quando ci passi sopra
@@ -69,7 +69,7 @@ cargo run --release -p lumifi-cli -- devices
 | Cartella | Contenuto |
 | --- | --- |
 | `crates/app` | l'app LumiFi (interfaccia in [gpui](https://gpui.rs)) |
-| `crates/engine` | il motore audio: decodifica (Symphonia), uscita (cpal), forma d'onda e spettro |
+| `crates/engine` | il motore audio: decodifica (Symphonia), uscita (cpal), forma d'onda |
 | `crates/cli` | `lumifi-cli`, per provare il motore da terminale |
 | `packaging/` | come si impacchetta l'app per macOS |
 | `patches/` | dipendenze corrette in locale (vedi il README lì dentro) |
@@ -77,7 +77,7 @@ cargo run --release -p lumifi-cli -- devices
 ## Roadmap
 
 1. **v0.1 — Fondamenta:** motore, CI e release per macOS e Windows.
-2. **v0.2 — Mini player:** musica locale, coda, viste A/B/C. *(ora)*
+2. **v0.2 — Mini player:** musica locale, coda, viste A/B. *(ora)*
 3. **v0.3 — Libreria e interfaccia:** app completa, scansione delle cartelle, album e artisti,
    playlist, testi sincronizzati.
 4. **v0.6 — Qualità ed EQ:** modalità esclusiva, gapless, ReplayGain, equalizzatore e AutoEq.

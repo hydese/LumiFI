@@ -84,10 +84,7 @@ fn main() {
             },
             Menu {
                 name: "Vista".into(),
-                items: vec![MenuItem::action(
-                    "Cambia visualizzazione (A/B/C)",
-                    CycleView,
-                )],
+                items: vec![MenuItem::action("Cambia visualizzazione (A/B)", CycleView)],
             },
         ]);
 

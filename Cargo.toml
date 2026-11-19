@@ -19,7 +19,6 @@ env_logger = "0.11.11"
 hound = "3.5.1"
 log = "0.4.35"
 rtrb = "0.4.1"
-rustfft = "6.4.1"
 symphonia = { version = "0.6.1", features = ["all"] }
 symphonia-opus = "0.1.3"
 thiserror = "2.0.21"
