@@ -8,6 +8,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Which builds to make
+        type: choice
+        options: [all, windows, macos]
+        default: all
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -31,37 +37,46 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
-  build:
-    name: ${{ matrix.name }}
+  macos:
+    name: macOS (Apple Silicon)
     needs: check
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[build]')
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: macOS (Apple Silicon)
-            os: macos-latest
-            artifact: lumifi-macos-arm64
-          - name: Windows (x64)
-            os: windows-latest
-            artifact: lumifi-windows-x64
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.platform != 'windows') ||
+      contains(github.event.head_commit.message, '[build]')
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
       - run: cargo build --release --workspace
-      - name: Bundle LumiFi.app (macOS)
-        if: runner.os == 'macOS'
+      - name: Bundle LumiFi.app
         run: |
           mkdir -p out
           version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
           packaging/macos/make-app.sh target/release/lumifi "$version" out
           cp target/release/lumifi-cli out/
           ditto -c -k --keepParent out/LumiFi.app out/LumiFi.app.zip && rm -rf out/LumiFi.app
-      - name: Collect (Windows)
-        if: runner.os == 'Windows'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lumifi-macos-arm64
+          path: out/*
+          retention-days: 14
+
+  windows:
+    name: Windows (x64)
+    needs: check
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.platform != 'macos') ||
+      contains(github.event.head_commit.message, '[build]')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo build --release --workspace
+      - name: Collect
         shell: pwsh
         run: |
           New-Item -ItemType Directory out | Out-Null
@@ -69,6 +84,6 @@ jobs:
           Copy-Item target/release/lumifi-cli.exe out/
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact }}
+          name: lumifi-windows-x64
           path: out/*
           retention-days: 14
