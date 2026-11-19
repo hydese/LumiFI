@@ -11,7 +11,7 @@ use lumifi_engine::{Player, Source, TrackInfo, format_time, output};
 
 #[derive(Parser)]
 #[command(
-    name = "lumifi",
+    name = "lumifi-cli",
     version,
     about = "LumiFi audio engine, from the command line"
 )]

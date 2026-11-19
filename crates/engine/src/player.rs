@@ -1,19 +1,21 @@
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, StreamTrait};
-use rtrb::RingBuffer;
+use rtrb::{Consumer, RingBuffer};
 
 use crate::output::{self, MAX_CHANNELS};
-use crate::{EngineError, Result, Source, TrackInfo};
+use crate::{Artwork, EngineError, Result, Source, TrackInfo, TrackTags};
 
 /// How much decoded audio is kept ready ahead of the device, in seconds.
 const BUFFER_SECONDS: usize = 2;
 /// How long the decoder waits when the buffer is full.
 const DECODER_IDLE: Duration = Duration::from_millis(5);
+/// How many mono samples the scope keeps for the visualiser (about 0.1 s at 44.1 kHz).
+const SCOPE_CAPACITY: usize = 8192;
 
 /// State shared between the caller, the decoder thread and the audio callback.
 struct Shared {
@@ -38,16 +40,30 @@ impl Shared {
 pub struct Player {
     shared: Arc<Shared>,
     info: TrackInfo,
+    tags: TrackTags,
+    artwork: Option<Artwork>,
     device_name: String,
     stream: cpal::Stream,
     decoder: Option<JoinHandle<Result<()>>>,
+    start: Duration,
+    scope: Mutex<Consumer<f32>>,
 }
 
 impl Player {
     /// Opens `path` and starts playing it immediately.
     pub fn play(path: &Path) -> Result<Self> {
+        Self::play_from(path, Duration::ZERO, 1.0)
+    }
+
+    /// Opens `path` and starts playing from `start`, at `volume` (0.0 to 1.0).
+    pub fn play_from(path: &Path, start: Duration, volume: f32) -> Result<Self> {
         let mut source = Source::open(path)?;
+        if !start.is_zero() {
+            source.seek(start)?;
+        }
         let info = source.info().clone();
+        let tags = source.tags().clone();
+        let artwork = source.artwork().cloned();
         let source_channels = usize::from(info.channels);
         if source_channels == 0 || source_channels > MAX_CHANNELS {
             return Err(EngineError::Unsupported("more than 8 channels"));
@@ -69,7 +85,7 @@ impl Player {
             stop: AtomicBool::new(false),
             decoder_done: AtomicBool::new(false),
             finished: AtomicBool::new(false),
-            volume: AtomicU32::new(1.0_f32.to_bits()),
+            volume: AtomicU32::new(volume.clamp(0.0, 1.0).to_bits()),
             frames_played: AtomicU64::new(0),
         });
 
@@ -108,6 +124,7 @@ impl Player {
             })?;
 
         let callback_shared = Arc::clone(&shared);
+        let (mut scope_in, scope_out) = RingBuffer::<f32>::new(SCOPE_CAPACITY);
         let mut frame = [0.0_f32; MAX_CHANNELS];
         let stream = device.build_output_stream(
             config.stream,
@@ -131,6 +148,10 @@ impl Player {
                         *slot = consumer.pop().unwrap_or(0.0);
                     }
                     output::map_frame(&frame[..source_channels], out);
+                    // A mono copy for the visualiser; dropped when nobody reads it.
+                    let mono =
+                        frame[..source_channels].iter().sum::<f32>() / source_channels as f32;
+                    let _ = scope_in.push(mono);
                     // At full volume the samples are left exactly as decoded.
                     if volume != 1.0 {
                         out.iter_mut().for_each(|sample| *sample *= volume);
@@ -147,15 +168,44 @@ impl Player {
         Ok(Self {
             shared,
             info,
+            tags,
+            artwork,
             device_name,
             stream,
             decoder: Some(decoder),
+            start,
+            scope: Mutex::new(scope_out),
         })
+    }
+
+    /// Moves the newest decoded samples (mono, before volume) into `out`, oldest first, keeping
+    /// at most `max`. Used by the spectrum view.
+    pub fn take_scope(&self, out: &mut Vec<f32>, max: usize) {
+        out.clear();
+        if let Ok(mut scope) = self.scope.lock() {
+            let available = scope.slots();
+            let skip = available.saturating_sub(max);
+            if let Ok(chunk) = scope.read_chunk(available) {
+                let (first, second) = chunk.as_slices();
+                out.extend(first.iter().chain(second).skip(skip).copied());
+                chunk.commit_all();
+            }
+        }
     }
 
     /// The track being played.
     pub fn info(&self) -> &TrackInfo {
         &self.info
+    }
+
+    /// The track's tags.
+    pub fn tags(&self) -> &TrackTags {
+        &self.tags
+    }
+
+    /// The cover stored in the file, if any.
+    pub fn artwork(&self) -> Option<&Artwork> {
+        self.artwork.as_ref()
     }
 
     /// The name of the device the audio goes to.
@@ -190,7 +240,7 @@ impl Player {
     /// How far playback has got.
     pub fn position(&self) -> Duration {
         let frames = self.shared.frames_played.load(Ordering::Relaxed);
-        Duration::from_secs_f64(frames as f64 / f64::from(self.info.sample_rate))
+        self.start + Duration::from_secs_f64(frames as f64 / f64::from(self.info.sample_rate))
     }
 
     /// True once every decoded sample has reached the device.

@@ -8,6 +8,7 @@
 //! - [`Player`] plays a [`Source`] on the default output device.
 //! - [`output`] lists devices and chooses a stream configuration that matches the track.
 
+pub mod analysis;
 mod error;
 pub mod output;
 mod player;
@@ -15,7 +16,7 @@ mod source;
 
 pub use error::{EngineError, Result};
 pub use player::Player;
-pub use source::{Source, TrackInfo};
+pub use source::{Artwork, Source, TrackInfo, TrackTags};
 
 /// Formats a duration as `m:ss`, or `h:mm:ss` from one hour up.
 pub fn format_time(duration: std::time::Duration) -> String {

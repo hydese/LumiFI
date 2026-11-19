@@ -26,7 +26,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -43,19 +43,32 @@ jobs:
           - name: macOS (Apple Silicon)
             os: macos-latest
             artifact: lumifi-macos-arm64
-            binary: lumifi
           - name: Windows (x64)
             os: windows-latest
             artifact: lumifi-windows-x64
-            binary: lumifi.exe
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
       - run: cargo build --release --workspace
+      - name: Bundle LumiFi.app (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p out
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          packaging/macos/make-app.sh target/release/lumifi "$version" out
+          cp target/release/lumifi-cli out/
+          ditto -c -k --keepParent out/LumiFi.app out/LumiFi.app.zip && rm -rf out/LumiFi.app
+      - name: Collect (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory out | Out-Null
+          Copy-Item target/release/lumifi.exe out/LumiFi.exe
+          Copy-Item target/release/lumifi-cli.exe out/
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: target/release/${{ matrix.binary }}
+          path: out/*
           retention-days: 14

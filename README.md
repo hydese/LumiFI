@@ -11,8 +11,9 @@ La tua musica, come è stata registrata.
 </div>
 
 > [!NOTE]
-> LumiFi è all'inizio. Oggi c'è il motore audio con un piccolo programma da riga di comando
-> per provarlo; l'app con la sua interfaccia arriva nelle prossime versioni.
+> LumiFi è all'inizio. Oggi c'è il **mini player**: suona la tua musica locale, con copertina,
+> coda, casuale, ripeti, volume e tre visualizzazioni. La libreria completa, l'equalizzatore e
+> Spotify arrivano nelle prossime versioni.
 
 ## L'idea
 
@@ -26,39 +27,61 @@ La tua musica, come è stata registrata.
 - 🔌 **Servizi a scelta.** Spotify, Apple Music e gli altri si attivano dalle impostazioni; se
   non li accendi, non li vedi.
 
-## Provare il motore
+## Provare il mini player
 
-Scarica il programma dalla pagina [Releases](https://github.com/hydese/lumifi/releases) quando
-c'è una versione pubblicata, oppure compilalo (serve [Rust](https://rustup.rs)):
+Scarica `LumiFi.app` (macOS) o `LumiFi.exe` (Windows) dalla pagina
+[Releases](https://github.com/hydese/LumiFI/releases), oppure compilalo (serve
+[Rust](https://rustup.rs)):
 
 ```sh
-cargo run --release -- info  "~/Music/album/01 - brano.flac"
-cargo run --release -- play  "~/Music/album/01 - brano.flac"
-cargo run --release -- play  brano.flac --volume 60
-cargo run --release -- devices
+cargo run --release -p lumifi                      # finestra vuota: trascinaci la musica
+cargo run --release -p lumifi -- ~/Music/Album     # parte subito con una cartella o dei file
 ```
 
-`info` mostra codec, frequenza, bit e durata; `play` lo suona sul dispositivo predefinito alla
-frequenza del file. Con il volume a 100 il segnale non viene toccato.
-
 > [!TIP]
-> **macOS:** i programmi non firmati da Apple vengono bloccati al primo avvio. Dopo averlo
-> scaricato, esegui `xattr -d com.apple.quarantine ./lumifi`.
+> **macOS:** l'app non è firmata da Apple. La prima volta aprila con tasto destro › Apri,
+> oppure esegui `xattr -dr com.apple.quarantine LumiFi.app`.
+
+| Tasto | Cosa fa |
+| --- | --- |
+| Spazio | Riproduci / pausa |
+| → / ← | Brano successivo / precedente |
+| Maiusc + → / ← | Avanti / indietro di 10 secondi |
+| ↑ / ↓ e rotella | Volume |
+| M | Silenzia |
+| S / R | Casuale / ripeti (tutto, un brano) |
+| V | Vista A (barra), B (forma d'onda), C (spettro) |
+| ⌘O / Ctrl+O | Apri file o cartelle |
+
+La finestra si sposta trascinandola dalla parte alta. I comandi compaiono quando ci passi sopra
+con il mouse.
+
+### Il motore da riga di comando
+
+```sh
+cargo run --release -p lumifi-cli -- info  "brano.flac"
+cargo run --release -p lumifi-cli -- play  "brano.flac" --volume 60
+cargo run --release -p lumifi-cli -- devices
+```
 
 ## Struttura
 
 | Cartella | Contenuto |
 | --- | --- |
-| `crates/engine` | il motore audio: decodifica (Symphonia) e uscita (cpal) |
-| `crates/cli` | il programma `lumifi` da riga di comando |
+| `crates/app` | l'app LumiFi (interfaccia in [gpui](https://gpui.rs)) |
+| `crates/engine` | il motore audio: decodifica (Symphonia), uscita (cpal), forma d'onda e spettro |
+| `crates/cli` | `lumifi-cli`, per provare il motore da terminale |
+| `packaging/` | come si impacchetta l'app per macOS |
+| `patches/` | dipendenze corrette in locale (vedi il README lì dentro) |
 
 ## Roadmap
 
 1. **v0.1 — Fondamenta:** motore, CI e release per macOS e Windows.
-2. **v0.3 — Libreria e interfaccia:** scansione delle cartelle, viste album e artisti, mini
-   player, coda e playlist.
-3. **v0.6 — Qualità ed EQ:** modalità esclusiva, gapless, ReplayGain, equalizzatore e AutoEq.
-4. **v1.0 — Servizi:** Spotify, telecomando di Music.app, Last.fm, aggiornamenti automatici.
+2. **v0.2 — Mini player:** musica locale, coda, viste A/B/C. *(ora)*
+3. **v0.3 — Libreria e interfaccia:** app completa, scansione delle cartelle, album e artisti,
+   playlist, testi sincronizzati.
+4. **v0.6 — Qualità ed EQ:** modalità esclusiva, gapless, ReplayGain, equalizzatore e AutoEq.
+5. **v1.0 — Servizi:** Spotify, telecomando di Music.app, Last.fm, aggiornamenti automatici.
 
 ## Licenza
 

@@ -97,3 +97,40 @@ fn garbage_is_rejected() {
     std::fs::write(&file.0, b"this is not audio at all").unwrap();
     assert!(Source::open(&file.0).is_err());
 }
+
+#[test]
+fn seek_skips_the_start() {
+    let file = temp_path("seek.wav");
+    write_wav(&file.0, 44_100, 2, 16, 44_100);
+    let mut source = Source::open(&file.0).unwrap();
+    source.seek(std::time::Duration::from_millis(250)).unwrap();
+    let frames = decode_all(&mut source).len() / 2;
+    // Three quarters of a second are left, give or take one packet.
+    assert_eq!(
+        frames, 33_075,
+        "exactly three quarters of a second are left"
+    );
+}
+
+#[test]
+fn waveform_has_the_asked_length_and_peaks_at_one() {
+    let file = temp_path("wave.wav");
+    write_wav(&file.0, 44_100, 1, 16, 44_100);
+    let peaks = lumifi_engine::analysis::waveform(&file.0, 60).unwrap();
+    assert_eq!(peaks.len(), 60);
+    let max = peaks.iter().copied().fold(0.0_f32, f32::max);
+    assert!((max - 1.0).abs() < 1e-6);
+    assert!(
+        peaks.iter().all(|p| *p > 0.5),
+        "a steady sine is loud everywhere"
+    );
+}
+
+#[test]
+fn untagged_files_have_empty_tags() {
+    let file = temp_path("notags.wav");
+    write_wav(&file.0, 44_100, 1, 16, 4_410);
+    let source = Source::open(&file.0).unwrap();
+    assert_eq!(source.tags().title, None);
+    assert!(source.artwork().is_none());
+}

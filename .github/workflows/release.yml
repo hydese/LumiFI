@@ -50,13 +50,17 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           mkdir -p out
-          tar -czf "out/lumifi-${GITHUB_REF_NAME}-${{ matrix.suffix }}.tar.gz" -C target/release lumifi
+          version="${GITHUB_REF_NAME#v}"
+          packaging/macos/make-app.sh target/release/lumifi "$version" out
+          ditto -c -k --keepParent out/LumiFi.app "out/LumiFi-${GITHUB_REF_NAME}-${{ matrix.suffix }}.zip"
+          rm -rf out/LumiFi.app
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory out | Out-Null
-          Compress-Archive target/release/lumifi.exe "out/lumifi-$env:GITHUB_REF_NAME-${{ matrix.suffix }}.zip"
+          Copy-Item target/release/lumifi.exe LumiFi.exe
+          Compress-Archive LumiFi.exe "out/LumiFi-$env:GITHUB_REF_NAME-${{ matrix.suffix }}.zip"
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.suffix }}

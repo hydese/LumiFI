@@ -12,6 +12,7 @@ authors.workspace = true
 cpal.workspace = true
 log.workspace = true
 rtrb.workspace = true
+rustfft.workspace = true
 symphonia.workspace = true
 symphonia-opus.workspace = true
 thiserror.workspace = true
