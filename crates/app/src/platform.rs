@@ -2,6 +2,8 @@
 //! windows on Windows, and dragging it by its background on macOS. Each is one system call;
 //! this is the only module allowed to use `unsafe`.
 #![allow(unsafe_code)]
+// The objc 0.2 macros test a `feature` cfg that this crate does not declare.
+#![allow(unexpected_cfgs)]
 
 use gpui::Window;
 
@@ -12,7 +14,7 @@ pub fn keep_on_top(window: &Window, on_top: bool) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
     };
-    let Ok(handle) = window.window_handle() else {
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return;
     };
     if let RawWindowHandle::Win32(win) = handle.as_raw() {
@@ -43,7 +45,7 @@ pub fn start_drag(window: &Window) {
         use objc::runtime::Object;
         use objc::{class, msg_send, sel, sel_impl};
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        let Ok(handle) = window.window_handle() else {
+        let Ok(handle) = HasWindowHandle::window_handle(window) else {
             return;
         };
         if let RawWindowHandle::AppKit(appkit) = handle.as_raw() {
