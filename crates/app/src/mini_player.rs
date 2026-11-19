@@ -23,6 +23,9 @@ pub const SIZE: f32 = 280.0;
 /// Inner padding of the control panel; the bars span the rest of the width.
 const PAD: f32 = 14.0;
 const WAVE_BARS: usize = 56;
+/// The volume pill in the top bar sits at a fixed place: these are its slider's edges.
+const VOLUME_LEFT: f32 = 10.0 + 28.0 + 6.0 + 8.0 + 14.0 + 6.0;
+const VOLUME_WIDTH: f32 = 56.0;
 const SPECTRUM_BARS: usize = 28;
 const SPECTRUM_FFT: usize = 2048;
 
@@ -421,9 +424,7 @@ impl MiniPlayer {
     }
 
     fn volume_at(&mut self, x: Pixels, cx: &mut Context<Self>) {
-        // The slider starts after the speaker button and stops before the number.
-        let (start, end) = (PAD + 30.0, SIZE - PAD - 30.0);
-        self.set_volume((f32::from(x) - start) / (end - start), cx);
+        self.set_volume((f32::from(x) - VOLUME_LEFT) / VOLUME_WIDTH, cx);
     }
 }
 
@@ -526,7 +527,9 @@ impl Render for MiniPlayer {
             .size_full()
             .relative()
             .overflow_hidden()
-            .rounded_xl()
+            // Rounded corners only where the window can be transparent (macOS); elsewhere they
+            // would leave dark corners.
+            .when(cfg!(target_os = "macos"), |root| root.rounded_xl())
             .bg(theme.ground)
             .text_color(theme.text)
             .font_family(".SystemUIFont")
@@ -556,7 +559,7 @@ impl Render for MiniPlayer {
             .child(self.render_cover(&theme))
             .child(self.render_drag_strip())
             .when(show_controls, |root| {
-                root.child(self.render_top_buttons(&theme))
+                root.child(self.render_top_buttons(&theme, cx))
             })
             .when(show_controls && !empty, |root| {
                 root.child(self.render_panel(&theme, cx))
@@ -599,7 +602,7 @@ impl MiniPlayer {
                     .flex_col()
                     .items_center()
                     .when(empty, |d| d.justify_center())
-                    .when(!empty, |d| d.pt(px(28.)))
+                    .when(!empty, |d| d.pt(px(60.)))
                     .gap(px(10.))
                     .child(
                         div()
@@ -660,7 +663,7 @@ impl MiniPlayer {
             })
     }
 
-    fn render_top_buttons(&self, theme: &Theme) -> impl IntoElement {
+    fn render_top_buttons(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let chip = |id: &'static str| {
             div()
                 .id(id)
@@ -685,15 +688,81 @@ impl MiniPlayer {
             .flex()
             .justify_between()
             .child(
-                chip("close")
-                    .px(px(0.))
-                    .child(icon("close", 13., gpui::rgb(0xffffff)))
-                    .on_click(|_, _, cx| cx.quit()),
+                div()
+                    .flex()
+                    .gap(px(6.))
+                    .child(
+                        chip("close")
+                            .px(px(0.))
+                            .child(icon("close", 13., gpui::rgb(0xffffff)))
+                            .on_click(|_, _, cx| cx.quit()),
+                    )
+                    .when(self.now.is_some(), |row| row.child(self.render_volume(cx))),
             )
             .child(
                 chip("view")
                     .child(format!("Vista {}", self.viz.label()))
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(CycleView), cx)),
+            )
+    }
+
+    /// A small pill: speaker (click to mute) and a short slider. The wheel works anywhere.
+    fn render_volume(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let volume = self.effective_volume();
+        let white = gpui::rgb(0xffffff);
+        div()
+            .id("volume-pill")
+            .h(px(28.))
+            .pl(px(8.))
+            .pr(px(10.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .rounded_md()
+            .bg(Theme::dark().chip)
+            .child(
+                div()
+                    .id("mute")
+                    .cursor_pointer()
+                    .child(icon(
+                        if volume == 0.0 {
+                            "volume-off"
+                        } else {
+                            "volume"
+                        },
+                        14.,
+                        white,
+                    ))
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleMute), cx)),
+            )
+            .child(
+                div()
+                    .id("volume")
+                    .w(px(VOLUME_WIDTH))
+                    .h(px(20.))
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            this.volume_at(event.position.x, cx)
+                        }),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(3.))
+                            .rounded_full()
+                            .bg(gpui::rgba(0xffffff40))
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(gpui::relative(volume))
+                                    .rounded_full()
+                                    .bg(white),
+                            ),
+                    ),
             )
     }
 
@@ -720,7 +789,6 @@ impl MiniPlayer {
             Repeat::All => ("repeat", theme.accent),
             Repeat::One => ("repeat-one", theme.accent),
         };
-        let volume = self.effective_volume();
 
         div()
             .id("panel")
@@ -820,49 +888,6 @@ impl MiniPlayer {
                         repeat_color,
                         CycleRepeat,
                     )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(icon_button(
-                        "mute",
-                        if volume == 0.0 {
-                            "volume-off"
-                        } else {
-                            "volume"
-                        },
-                        14.,
-                        22.,
-                        theme.muted,
-                        ToggleMute,
-                    ))
-                    .child(
-                        div()
-                            .id("volume")
-                            .flex_1()
-                            .h(px(14.))
-                            .flex()
-                            .items_center()
-                            .cursor_pointer()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                                    this.volume_at(event.position.x, cx)
-                                }),
-                            )
-                            .child(bar(volume, theme, 4.)),
-                    )
-                    .child(
-                        div()
-                            .w(px(22.))
-                            .flex()
-                            .justify_end()
-                            .text_size(px(10.5))
-                            .text_color(theme.muted)
-                            .child(format!("{}", (volume * 100.0).round() as u32)),
-                    ),
             )
     }
 

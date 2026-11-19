@@ -6,7 +6,7 @@
 //! the wrong speed.
 
 use cpal::traits::{DeviceTrait, HostTrait};
-use cpal::{BufferSize, SampleFormat, StreamConfig};
+use cpal::{BufferSize, SampleFormat, StreamConfig, SupportedBufferSize};
 
 use crate::{EngineError, Result};
 
@@ -56,6 +56,16 @@ pub struct OutputConfig {
     pub device_channels: u16,
 }
 
+/// About 50 ms of audio: big enough not to crackle when the computer is busy, small enough that
+/// pause and volume still feel instant.
+fn roomy_frames(rate: u32, supported: &SupportedBufferSize) -> Option<u32> {
+    let wanted = (rate / 20).max(256);
+    match supported {
+        SupportedBufferSize::Range { min, max } => Some(wanted.clamp(*min, *max)),
+        SupportedBufferSize::Unknown => None,
+    }
+}
+
 /// Picks a 32-bit float configuration at exactly `rate`, preferring the track's own channel count.
 pub fn pick_config(device: &cpal::Device, rate: u32, channels: u16) -> Result<OutputConfig> {
     let unsupported = EngineError::UnsupportedFormat { rate, channels };
@@ -81,7 +91,9 @@ pub fn pick_config(device: &cpal::Device, rate: u32, channels: u16) -> Result<Ou
         stream: StreamConfig {
             channels: chosen.channels(),
             sample_rate: rate,
-            buffer_size: BufferSize::Default,
+            // A roomier buffer than most systems default to, within what the device allows.
+            buffer_size: roomy_frames(rate, chosen.buffer_size())
+                .map_or(BufferSize::Default, BufferSize::Fixed),
         },
         device_channels: chosen.channels(),
     })
@@ -103,7 +115,17 @@ pub fn map_frame(source: &[f32], device: &mut [f32]) {
 
 #[cfg(test)]
 mod tests {
-    use super::map_frame;
+    use super::{map_frame, roomy_frames};
+    use cpal::SupportedBufferSize;
+
+    #[test]
+    fn roomy_buffer_is_about_fifty_milliseconds_within_limits() {
+        let range = SupportedBufferSize::Range { min: 64, max: 8192 };
+        assert_eq!(roomy_frames(48_000, &range), Some(2400));
+        let tight = SupportedBufferSize::Range { min: 64, max: 1024 };
+        assert_eq!(roomy_frames(48_000, &tight), Some(1024));
+        assert_eq!(roomy_frames(48_000, &SupportedBufferSize::Unknown), None);
+    }
 
     #[test]
     fn stereo_to_stereo_is_untouched() {
