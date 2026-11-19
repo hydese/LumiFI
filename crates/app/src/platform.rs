@@ -7,7 +7,7 @@
 
 use gpui::Window;
 
-/// Keeps the window above all others (Windows). macOS gets this from the window kind.
+/// Keeps the window above all others, or puts it back among them.
 #[cfg(target_os = "windows")]
 pub fn keep_on_top(window: &Window, on_top: bool) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -35,7 +35,31 @@ pub fn keep_on_top(window: &Window, on_top: bool) {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+pub fn keep_on_top(window: &Window, on_top: bool) {
+    use objc::runtime::Object;
+    use objc::{msg_send, sel, sel_impl};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    // NSFloatingWindowLevel and NSNormalWindowLevel.
+    const FLOATING: isize = 3;
+    const NORMAL: isize = 0;
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    if let RawWindowHandle::AppKit(appkit) = handle.as_raw() {
+        let view = appkit.ns_view.as_ptr() as *mut Object;
+        // SAFETY: the view belongs to this live window.
+        unsafe {
+            let ns_window: *mut Object = msg_send![view, window];
+            if !ns_window.is_null() {
+                let level = if on_top { FLOATING } else { NORMAL };
+                let _: () = msg_send![ns_window, setLevel: level];
+            }
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn keep_on_top(_window: &Window, _on_top: bool) {}
 
 /// Starts moving the window with the mouse button that is down right now.

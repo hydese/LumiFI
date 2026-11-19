@@ -79,7 +79,13 @@ pub struct MiniPlayer {
     volume: f32,
     muted: bool,
     viz: Viz,
-    hovered: bool,
+    /// The controls are showing (mouse over the window, paused, or nothing loaded).
+    controls: bool,
+    /// Hides the controls a moment after the mouse leaves, so edges don't flicker.
+    _hide_controls: Option<Task<()>>,
+    always_on_top: bool,
+    /// Position shown at the last redraw, to redraw only when something visible moved.
+    drawn_position: Duration,
     waveform: Vec<f32>,
     spectrum: Spectrum,
     bars: Vec<f32>,
@@ -121,7 +127,10 @@ impl MiniPlayer {
             volume: 0.8,
             muted: false,
             viz: Viz::B,
-            hovered: false,
+            controls: false,
+            _hide_controls: None,
+            always_on_top: false,
+            drawn_position: Duration::ZERO,
             waveform: Vec::new(),
             spectrum: Spectrum::new(SPECTRUM_FFT, SPECTRUM_BARS),
             bars: vec![0.0; SPECTRUM_BARS],
@@ -226,14 +235,47 @@ impl MiniPlayer {
             }
             return;
         }
-        if self.paused {
+        if self.paused || !self.controls {
             return;
         }
         if self.viz == Viz::C {
             player.take_scope(&mut self.scope, SPECTRUM_FFT);
             let rate = self.now.as_ref().map_or(44_100, |n| n.sample_rate);
             self.bars = self.spectrum.update(&self.scope, rate).to_vec();
+            cx.notify();
+            return;
         }
+        // Bar and waveform: a few redraws a second are enough.
+        let position = player.position();
+        if position.abs_diff(self.drawn_position) >= Duration::from_millis(250) {
+            self.drawn_position = position;
+            cx.notify();
+        }
+    }
+
+    fn set_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if hovered {
+            self._hide_controls = None;
+            if !self.controls {
+                self.controls = true;
+                cx.notify();
+            }
+            return;
+        }
+        self._hide_controls = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(900))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.controls = false;
+                cx.notify();
+            });
+        }));
+    }
+
+    pub fn toggle_on_top(&mut self, _: &ToggleOnTop, window: &mut Window, cx: &mut Context<Self>) {
+        self.always_on_top = !self.always_on_top;
+        platform::keep_on_top(window, self.always_on_top);
         cx.notify();
     }
 
@@ -474,7 +516,8 @@ fn icon_button(
 impl Render for MiniPlayer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::for_appearance(window.appearance());
-        let show_controls = self.hovered || self.now.is_none() || self.paused;
+        let empty = self.now.is_none();
+        let show_controls = self.controls || empty || self.paused;
 
         div()
             .id("mini-player")
@@ -488,8 +531,7 @@ impl Render for MiniPlayer {
             .text_color(theme.text)
             .font_family(".SystemUIFont")
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                this.hovered = *hovered;
-                cx.notify();
+                this.set_hovered(*hovered, cx);
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
                 let dy = f32::from(event.delta.pixel_delta(window.line_height()).y);
@@ -510,11 +552,14 @@ impl Render for MiniPlayer {
             .on_action(cx.listener(Self::seek_forward))
             .on_action(cx.listener(Self::seek_back))
             .on_action(cx.listener(Self::open))
+            .on_action(cx.listener(Self::toggle_on_top))
             .child(self.render_cover(&theme))
             .child(self.render_drag_strip())
             .when(show_controls, |root| {
                 root.child(self.render_top_buttons(&theme))
-                    .child(self.render_panel(&theme, cx))
+            })
+            .when(show_controls && !empty, |root| {
+                root.child(self.render_panel(&theme, cx))
             })
             .when_some(self.error.clone(), |root, error| {
                 root.child(
@@ -575,9 +620,24 @@ impl MiniPlayer {
                         )
                         .child(
                             div()
-                                .text_size(px(11.5))
-                                .text_color(theme.muted)
-                                .child("oppure premi ⌘O / Ctrl+O"),
+                                .id("open-empty")
+                                .mt(px(4.))
+                                .h(px(32.))
+                                .px(px(14.))
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .rounded_lg()
+                                .bg(theme.accent)
+                                .text_color(theme.on_accent)
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .cursor_pointer()
+                                .child(icon("folder", 14., theme.on_accent))
+                                .child("Apri musica…")
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(Open), cx)
+                                }),
                         )
                     })
                     .into_any_element()
@@ -675,8 +735,6 @@ impl MiniPlayer {
             .flex()
             .flex_col()
             .gap(px(7.))
-            // Clicks on the panel are not window drags.
-            .occlude()
             .child(
                 div()
                     .flex()

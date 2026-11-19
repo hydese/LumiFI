@@ -92,13 +92,6 @@ fn main() {
         ]);
 
         let bounds = Bounds::centered(None, size(px(SIZE), px(SIZE)), cx);
-        // macOS: a panel that floats above other windows. Windows and Linux: a normal
-        // window (so it shows in the taskbar), kept on top separately.
-        let kind = if cfg!(target_os = "macos") {
-            WindowKind::PopUp
-        } else {
-            WindowKind::Normal
-        };
         let window = cx
             .open_window(
                 WindowOptions {
@@ -108,7 +101,7 @@ fn main() {
                         appears_transparent: true,
                         traffic_light_position: Some(gpui::point(px(-100.), px(-100.))),
                     }),
-                    kind,
+                    kind: WindowKind::Normal,
                     is_resizable: false,
                     is_minimizable: true,
                     window_background: if cfg!(target_os = "linux") {
@@ -120,10 +113,7 @@ fn main() {
                     app_id: Some("lumifi".into()),
                     ..Default::default()
                 },
-                |window, cx| {
-                    platform::keep_on_top(window, true);
-                    cx.new(|cx| MiniPlayer::new(files.clone(), window, cx))
-                },
+                |window, cx| cx.new(|cx| MiniPlayer::new(files.clone(), window, cx)),
             )
             .expect("could not open the LumiFi window");
 

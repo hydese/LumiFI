@@ -17,6 +17,7 @@ actions!(
         SeekForward,
         SeekBack,
         Open,
+        ToggleOnTop,
         Quit,
     ]
 );
@@ -35,6 +36,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("s", ToggleShuffle, ctx),
         KeyBinding::new("r", CycleRepeat, ctx),
         KeyBinding::new("v", CycleView, ctx),
+        KeyBinding::new("t", ToggleOnTop, ctx),
         KeyBinding::new("secondary-o", Open, None),
         KeyBinding::new("secondary-q", Quit, None),
     ]);

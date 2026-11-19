@@ -33,7 +33,7 @@ impl Theme {
     pub fn dark() -> Self {
         Self {
             ground: rgb(0x0d0d0e),
-            scrim: rgba(0x0a0a0bc2),
+            scrim: rgba(0x0a0a0bdb),
             text: rgb(0xf3f2f0),
             muted: rgb(0xb5b5b9),
             track: rgba(0xffffff33),
@@ -47,7 +47,7 @@ impl Theme {
     pub fn light() -> Self {
         Self {
             ground: rgb(0xf7f6f4),
-            scrim: rgba(0xfaf9f7d6),
+            scrim: rgba(0xfaf9f7eb),
             text: rgb(0x1c1c1e),
             muted: rgb(0x55555a),
             track: rgba(0x00000024),
