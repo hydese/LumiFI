@@ -9,7 +9,7 @@ use gpui::{
 };
 
 use crate::actions::{OpenSettings, Quit, ToggleLibrary};
-use crate::settings::{Dock, MINI_SCALES, MiniStyle, Settings, settings};
+use crate::settings::{Dock, MiniStyle, Settings, fit_scale, mini_scales, settings};
 use crate::theme::Theme;
 use crate::widgets::icon;
 
@@ -41,7 +41,7 @@ enum Choice {
 
 fn entries(value: &Settings) -> Vec<Entry> {
     let mut list = vec![Entry::Header("Dimensione")];
-    for scale in MINI_SCALES {
+    for &scale in mini_scales(value.mini_style) {
         list.push(Entry::Item {
             label: format!("{}%", (scale * 100.0).round()).into(),
             checked: (value.mini_scale - scale).abs() < 0.01,
@@ -174,9 +174,12 @@ impl MiniMenu {
                 s.update(cx, |v| v.always_on_top = !v.always_on_top)
             }),
             Choice::Dock(dock) => settings.update(cx, |s, cx| s.update(cx, |v| v.mini_dock = dock)),
-            Choice::Style(style) => {
-                settings.update(cx, |s, cx| s.update(cx, |v| v.mini_style = style))
-            }
+            Choice::Style(style) => settings.update(cx, |s, cx| {
+                s.update(cx, |v| {
+                    v.mini_style = style;
+                    v.mini_scale = fit_scale(style, v.mini_scale);
+                })
+            }),
             Choice::Settings => cx.dispatch_action(&OpenSettings),
             Choice::Library => cx.dispatch_action(&ToggleLibrary),
             Choice::Quit => cx.dispatch_action(&Quit),

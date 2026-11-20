@@ -16,14 +16,12 @@ use lumifi_engine::format_time;
 use crate::actions::*;
 use crate::mini_menu;
 use crate::platform;
-use crate::playback::{Playback, WAVE_BARS, playback};
+use crate::playback::{Playback, playback};
 use crate::queue::Repeat;
-use crate::settings::{Dock, MiniStyle, MiniView, Settings, SettingsModel, settings};
+use crate::settings::{Dock, MiniStyle, Settings, SettingsModel, settings};
 use crate::theme::Theme;
 use crate::widgets::{SlideEvent, slider};
 
-/// Bars in the strip's waveform: fewer and wider than in the square.
-const STRIP_BARS: usize = 26;
 /// Height of the square's extra controls (times, buttons, volume) when they are up.
 const SQUARE_EXTRA: f32 = 102.0;
 
@@ -37,7 +35,7 @@ pub fn base_size(style: MiniStyle) -> (f32, f32) {
 
 pub fn window_size(style: MiniStyle, scale: f32) -> Size<Pixels> {
     let (w, h) = base_size(style);
-    let scale = scale.clamp(0.5, 3.0);
+    let scale = scale.clamp(0.25, 3.0);
     size(px((w * scale).round()), px((h * scale).round()))
 }
 
@@ -70,24 +68,6 @@ fn icon(name: &str, points: f32, color: Rgba) -> gpui::Svg {
         .size(u(points))
         .flex_none()
         .text_color(color)
-}
-
-/// The strip's waveform: the analysed peaks averaged into fewer bars, never too flat.
-pub fn strip_peaks(waveform: &[f32], bars: usize) -> Vec<f32> {
-    (0..bars)
-        .map(|i| {
-            if waveform.is_empty() {
-                return 0.35;
-            }
-            let from = i * waveform.len() / bars;
-            let to = ((i + 1) * waveform.len() / bars)
-                .max(from + 1)
-                .min(waveform.len());
-            let slice = &waveform[from..to];
-            let mean = slice.iter().sum::<f32>() / slice.len() as f32;
-            0.25 + 0.75 * mean.clamp(0.0, 1.0)
-        })
-        .collect()
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -294,6 +274,7 @@ impl Render for MiniPlayer {
         }
         let content = match self.style {
             MiniStyle::Strip => self.render_strip(&theme, cx),
+            MiniStyle::Square if self.is_tiny() => self.render_tiny(&theme, cx),
             MiniStyle::Square => self.render_square(&theme, cx),
         };
         let radius = if self.style == MiniStyle::Strip {
@@ -423,7 +404,12 @@ impl MiniPlayer {
 
     /// The volume slider of the design: a 4-point track with a round knob.
     fn volume_slider(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let volume = self.playback.read(cx).effective_volume();
+        let playback = self.playback.read(cx);
+        let volume = if playback.is_muted() {
+            0.0
+        } else {
+            playback.volume()
+        };
         let this = cx.entity().downgrade();
         slider(
             "volume",
@@ -441,7 +427,7 @@ impl MiniPlayer {
     }
 
     fn mute_button(&self, points: f32, theme: &Theme, cx: &Context<Self>) -> impl IntoElement {
-        let muted = self.playback.read(cx).effective_volume() == 0.0;
+        let muted = self.playback.read(cx).is_muted();
         button(
             "mute",
             points + 8.,
@@ -466,60 +452,22 @@ impl MiniPlayer {
         )
     }
 
-    /// Progress as the design draws it: the waveform (B) or a plain bar (A). Drag to seek.
+    /// The progress bar. Drag to seek.
     fn progress_view(
         &self,
-        bars: usize,
         height: f32,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let progress = self.progress(cx);
-        let view = self.settings.read(cx).value.mini_view;
-        let content = match view {
-            MiniView::A => div()
-                .h(u(height))
-                .flex()
-                .items_center()
-                .child(plain_track(progress, theme.track, theme.text))
-                .into_any_element(),
-            MiniView::B => {
-                let waveform = self.playback.read(cx).waveform();
-                let played = (progress * bars as f32) as usize;
-                let strip = bars == STRIP_BARS;
-                let peaks: Vec<f32> = if strip {
-                    strip_peaks(waveform, bars)
-                } else {
-                    (0..bars)
-                        .map(|i| {
-                            if waveform.is_empty() {
-                                0.15
-                            } else {
-                                waveform[i * WAVE_BARS / bars]
-                            }
-                        })
-                        .collect()
-                };
-                div()
-                    .h(u(height))
-                    .flex()
-                    .items_center()
-                    .gap(u(if strip { 2.5 } else { 2. }))
-                    .children(peaks.into_iter().enumerate().map(|(i, peak)| {
-                        let min = if strip { 4. } else { 3. };
-                        div()
-                            .flex_1()
-                            .h(u(min + peak * (height - min)))
-                            .rounded(u(if strip { 2. } else { 1. }))
-                            .bg(if i < played {
-                                theme.accent
-                            } else {
-                                theme.unplayed
-                            })
-                    }))
-                    .into_any_element()
-            }
+        let progress = match self.drag {
+            Drag::Seek(at) => at,
+            _ => self.progress(cx),
         };
+        let content = div().h(u(height)).flex().items_center().child(plain_track(
+            progress,
+            theme.track,
+            theme.accent,
+        ));
         let this = cx.entity().downgrade();
         slider(
             "progress",
@@ -600,7 +548,7 @@ impl MiniPlayer {
                                     .child(artist),
                             ),
                     )
-                    .child(self.progress_view(STRIP_BARS, 22., theme, cx)),
+                    .child(self.progress_view(22., theme, cx)),
             )
             .child(
                 div()
@@ -652,6 +600,43 @@ impl MiniPlayer {
             .into_any_element()
     }
 
+    // The smallest square: only the cover, and play on hover ----------------------------------
+
+    fn is_tiny(&self) -> bool {
+        self.style == MiniStyle::Square && self.scale < 0.3
+    }
+
+    fn render_tiny(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let paused = self.playback.read(cx).is_paused();
+        div()
+            .absolute()
+            .inset_0()
+            .child(div().absolute().inset_0().child(self.cover(theme, cx)))
+            .when(self.hovered, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(gpui::rgba(0x0000004d))
+                        .child(
+                            button(
+                                "play",
+                                112.,
+                                112.,
+                                icon(if paused { "play" } else { "pause" }, 56., theme.on_accent),
+                                TogglePlay,
+                            )
+                            .rounded_full()
+                            .bg(theme.accent),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
     // The square ------------------------------------------------------------------------------
 
     fn render_square(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -671,7 +656,11 @@ impl MiniPlayer {
             Repeat::All => ("repeat", theme.accent),
             Repeat::One => ("repeat-one", theme.accent),
         };
-        let volume = (playback.effective_volume() * 100.0).round() as u32;
+        let volume = if playback.is_muted() {
+            0
+        } else {
+            (playback.volume() * 100.0).round() as u32
+        };
         let chip = gpui::rgba(0x080809a8);
         let white = gpui::rgb(0xffffff);
         let expanded = self.expanded;
@@ -820,7 +809,7 @@ impl MiniPlayer {
                                     .child(subtitle),
                             ),
                     )
-                    .child(self.progress_view(WAVE_BARS, 22., theme, cx))
+                    .child(self.progress_view(22., theme, cx))
                     .child(extra),
             )
             .into_any_element()
@@ -870,11 +859,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strip_peaks_average_and_never_go_flat() {
-        let peaks = strip_peaks(&[0.0, 1.0, 0.0, 1.0], 2);
-        assert_eq!(peaks, vec![0.625, 0.625]);
-        assert!(strip_peaks(&[], 26).iter().all(|&p| p > 0.3));
-        assert_eq!(strip_peaks(&[0.5; 56], 26).len(), 26);
+    fn the_smallest_square_is_only_the_cover() {
+        let size = window_size(MiniStyle::Square, 0.25);
+        assert_eq!((size.width, size.height), (px(70.), px(70.)));
     }
 
     #[test]

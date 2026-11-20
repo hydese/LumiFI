@@ -170,9 +170,88 @@ pub struct TrackRow {
     pub current: bool,
     /// ...and it is playing (not paused).
     pub playing: bool,
+    /// The heart and the ⋯ button, shown under the mouse.
+    pub actions: Option<AnyElement>,
+}
+
+/// The heart (always visible on a favourite, otherwise under the mouse) and the ⋯ menu button
+/// of a track row. Neither click reaches the row.
+pub fn row_actions(
+    key: &SharedString,
+    path: PathBuf,
+    favorite: bool,
+    in_playlist: Option<String>,
+    this: gpui::WeakEntity<LibraryWindow>,
+    theme: &Theme,
+) -> AnyElement {
+    let group = SharedString::from(format!("row-{key}"));
+    let stop = |_: &gpui::MouseDownEvent, _: &mut Window, cx: &mut gpui::App| cx.stop_propagation();
+    let heart_path = path.clone();
+    let heart_this = this.clone();
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(2.))
+        .child(
+            div()
+                .id(SharedString::from(format!("{key}-heart")))
+                .size(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .hover(|d| d.bg(theme.hover))
+                .when(!favorite, |d| {
+                    d.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.))
+                })
+                .child(if favorite {
+                    icon("heart-filled", 15., theme.accent)
+                } else {
+                    icon("heart", 15., theme.muted)
+                })
+                .on_mouse_down(gpui::MouseButton::Left, stop)
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    let path = heart_path.clone();
+                    let _ = heart_this.update(cx, |this, cx| {
+                        this.playlists
+                            .update(cx, |p, cx| p.toggle_favorite(&path, cx))
+                    });
+                }),
+        )
+        .child(
+            div()
+                .id(SharedString::from(format!("{key}-more")))
+                .size(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .hover(|d| d.bg(theme.hover))
+                .opacity(0.)
+                .group_hover(group, |s| s.opacity(1.))
+                .child(icon("more", 15., theme.muted))
+                .on_mouse_down(gpui::MouseButton::Left, stop)
+                .on_click(move |event, _, cx| {
+                    cx.stop_propagation();
+                    let position = event.position();
+                    let path = path.clone();
+                    let in_playlist = in_playlist.clone();
+                    let _ = this.update(cx, |this, cx| {
+                        this.track_menu(vec![path], position, in_playlist, cx)
+                    });
+                }),
+        )
+        .into_any_element()
 }
 
 /// "# · Titolo · Album · clock" over a track list, with a line under it.
+/// The heart and ⋯ buttons with their gap.
+pub const ACTIONS_WIDTH: f32 = 58.0;
+
 pub fn table_header(with_album: bool, compact: bool, theme: &Theme) -> impl IntoElement {
     div()
         .h(px(34.))
@@ -197,6 +276,8 @@ pub fn table_header(with_album: bool, compact: bool, theme: &Theme) -> impl Into
         .when(with_album && !compact, |d| {
             d.child(div().flex_1().min_w_0().child("Album"))
         })
+        // Room for the heart and the ⋯ of the rows.
+        .child(div().w(px(ACTIONS_WIDTH)).flex_none())
         .child(
             div()
                 .w(px(DURATION_WIDTH))
@@ -304,6 +385,7 @@ pub fn track_row(row: TrackRow, compact: bool, theme: &Theme) -> gpui::Stateful<
                     .child(album),
             )
         })
+        .children(row.actions)
         .child(
             div()
                 .w(px(DURATION_WIDTH))

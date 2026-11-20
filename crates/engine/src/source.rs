@@ -56,7 +56,7 @@ impl TrackInfo {
 }
 
 /// What the file's tags say about the track.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TrackTags {
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -65,6 +65,8 @@ pub struct TrackTags {
     pub track_number: Option<u64>,
     /// Unsynchronised lyrics stored in the file, if any.
     pub lyrics: Option<String>,
+    /// ReplayGain values, when the file has them.
+    pub gain: crate::dsp::GainTags,
 }
 
 /// A picture stored in the file, usually the front cover.
@@ -263,6 +265,18 @@ fn read_tags(reader: &mut dyn FormatReader) -> (TrackTags, Option<Artwork>) {
                     tags.track_number = Some(*n)
                 }
                 Some(StandardTag::Lyrics(v)) if tags.lyrics.is_none() => tags.lyrics = text(v),
+                Some(StandardTag::ReplayGainTrackGain(v)) => {
+                    tags.gain.track_gain = crate::dsp::parse_gain_value(v)
+                }
+                Some(StandardTag::ReplayGainTrackPeak(v)) => {
+                    tags.gain.track_peak = crate::dsp::parse_gain_value(v)
+                }
+                Some(StandardTag::ReplayGainAlbumGain(v)) => {
+                    tags.gain.album_gain = crate::dsp::parse_gain_value(v)
+                }
+                Some(StandardTag::ReplayGainAlbumPeak(v)) => {
+                    tags.gain.album_peak = crate::dsp::parse_gain_value(v)
+                }
                 _ => {}
             }
         }

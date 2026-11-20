@@ -38,7 +38,6 @@ pub struct Theme {
     pub muted: Rgba,
     pub faint: Rgba,
     pub track: Rgba,
-    pub unplayed: Rgba,
     pub accent: Rgba,
     pub on_accent: Rgba,
     /// Accent-coloured text, readable on the background.
@@ -86,7 +85,6 @@ impl Theme {
             muted: rgb(0xa3a3a7),
             faint: rgb(0x8b8b90),
             track: rgba(0xffffff29),
-            unplayed: rgba(0xffffff4d),
             accent: rgb(ACCENT),
             on_accent: rgb(ON_ACCENT),
             accent_text: rgb(0xff9b80),
@@ -112,7 +110,6 @@ impl Theme {
             muted: rgb(0x6e6e73),
             faint: rgb(0x6e6e73),
             track: rgba(0x0000001f),
-            unplayed: rgba(0x00000038),
             accent: rgb(ACCENT),
             on_accent: rgb(ON_ACCENT),
             accent_text: rgb(0xc2401f),

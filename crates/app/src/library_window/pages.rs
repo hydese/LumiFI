@@ -5,13 +5,17 @@ use std::path::{Path, PathBuf};
 
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, ObjectFit, ParentElement, SharedString, StatefulInteractiveElement, Styled,
+    MouseUpEvent, ObjectFit, ParentElement, SharedString, StatefulInteractiveElement, Styled,
     StyledImage, WeakEntity, Window, div, img, prelude::*, px, uniform_list,
 };
 use lumifi_engine::format_time;
 
-use super::parts::{TrackRow, cover, label, play_dot, table_header, thousands, track_row};
-use super::{CONTENT_PAD, LibraryWindow, Page, QUEUE_WIDTH, SIDEBAR_COMPACT, SIDEBAR_WIDTH};
+use super::parts::{
+    TrackRow, cover, label, play_dot, row_actions, table_header, thousands, track_row,
+};
+use super::{
+    CONTENT_PAD, LibraryWindow, Page, QUEUE_WIDTH, SIDEBAR_COMPACT, SIDEBAR_WIDTH, SearchMore,
+};
 use crate::library::LibraryData;
 use crate::lyrics::{Lyrics, LyricsState, current_line};
 use crate::playlists::FAVORITES;
@@ -238,7 +242,7 @@ impl LibraryWindow {
             .on_click(move |_, _, cx| {
                 let _ = this.update(cx, |this, cx| this.go(Page::Album(index), cx));
             })
-            .on_mouse_down(MouseButton::Right, move |event: &MouseDownEvent, _, cx| {
+            .on_mouse_up(MouseButton::Right, move |event: &MouseUpEvent, _, cx| {
                 let paths = paths.clone();
                 let position = event.position;
                 let _ = menu.update(cx, |this, cx| this.track_menu(paths, position, None, cx));
@@ -320,11 +324,22 @@ impl LibraryWindow {
         play: impl Fn(&mut Self, usize, &mut Context<Self>) + Clone + 'static,
     ) -> Vec<AnyElement> {
         let data = self.library.read(cx).data();
+        let entity = cx.entity().downgrade();
         paths
             .iter()
             .enumerate()
             .map(|(i, path)| {
                 let info = label(&data, path);
+                let row_key: SharedString = format!("{key}-{i}").into();
+                let favorite = self.playlists.read(cx).is_favorite(path);
+                let actions = row_actions(
+                    &row_key,
+                    path.clone(),
+                    favorite,
+                    in_playlist.clone(),
+                    entity.clone(),
+                    theme,
+                );
                 let (current, playing) = self.row_state(path, cx);
                 let number = numbers
                     .as_ref()
@@ -336,7 +351,7 @@ impl LibraryWindow {
                 let play = play.clone();
                 track_row(
                     TrackRow {
-                        key: format!("{key}-{i}").into(),
+                        key: row_key,
                         number,
                         title: info.title,
                         artist: info.artist,
@@ -345,6 +360,7 @@ impl LibraryWindow {
                         duration: info.duration,
                         current,
                         playing,
+                        actions: Some(actions),
                     },
                     compact,
                     theme,
@@ -353,9 +369,9 @@ impl LibraryWindow {
                     let play = play.clone();
                     this.click_track(&click_path, cx, move |this, cx| play(this, i, cx));
                 }))
-                .on_mouse_down(
+                .on_mouse_up(
                     MouseButton::Right,
-                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.listener(move |this, event: &MouseUpEvent, _, cx| {
                         this.track_menu(
                             vec![menu_path.clone()],
                             event.position,
@@ -603,6 +619,46 @@ impl LibraryWindow {
             theme,
             cx,
         );
+        let all_paths = |this: &mut Self, cx: &mut Context<Self>| -> Vec<std::path::PathBuf> {
+            let data = this.library.read(cx).data();
+            data.tracks.iter().map(|t| t.path.clone()).collect()
+        };
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .pr(px(CONTENT_PAD))
+            .child(header)
+            .when(!data.tracks.is_empty(), |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .gap(px(10.))
+                        .child(
+                            pill("tracks-play", "play", "Riproduci", true, theme).on_click(
+                                cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    let paths = all_paths(this, cx);
+                                    this.play_paths(paths, 0, false, cx)
+                                }),
+                            ),
+                        )
+                        .child(
+                            pill("tracks-shuffle", "shuffle", "Casuale", false, theme).on_click(
+                                cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    let paths = all_paths(this, cx);
+                                    // A different first track each time.
+                                    let start = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.subsec_nanos() as usize)
+                                        .unwrap_or(0)
+                                        % paths.len().max(1);
+                                    this.play_paths(paths, start, true, cx)
+                                }),
+                            ),
+                        ),
+                )
+            });
         if data.tracks.is_empty() {
             return div()
                 .flex_1()
@@ -618,6 +674,12 @@ impl LibraryWindow {
         };
         let this = cx.entity().downgrade();
         let theme = *theme;
+        let favorites: std::collections::HashSet<std::path::PathBuf> = self
+            .playlists
+            .read(cx)
+            .get(crate::playlists::FAVORITES)
+            .map(|p| p.tracks.iter().cloned().collect())
+            .unwrap_or_default();
         div()
             .flex_1()
             .min_h_0()
@@ -640,10 +702,19 @@ impl LibraryWindow {
                             let menu_path = track.path.clone();
                             let album = &data.albums[track.album_index];
                             let current = current_path.as_deref() == Some(track.path.as_path());
+                            let row_key: SharedString = format!("track-{i}").into();
+                            let actions = row_actions(
+                                &row_key,
+                                track.path.clone(),
+                                favorites.contains(&track.path),
+                                None,
+                                this.clone(),
+                                &theme,
+                            );
                             div().px(px(CONTENT_PAD - 10.)).child(
                                 track_row(
                                     TrackRow {
-                                        key: format!("track-{i}").into(),
+                                        key: row_key,
                                         number: (i + 1).to_string(),
                                         title: track.title.clone(),
                                         artist: track.artist.clone(),
@@ -652,6 +723,7 @@ impl LibraryWindow {
                                         duration: track.duration.map(format_time),
                                         current,
                                         playing: current && playing,
+                                        actions: Some(actions),
                                     },
                                     compact,
                                     &theme,
@@ -669,9 +741,9 @@ impl LibraryWindow {
                                         })
                                     });
                                 })
-                                .on_mouse_down(
+                                .on_mouse_up(
                                     MouseButton::Right,
-                                    move |event: &MouseDownEvent, _, cx| {
+                                    move |event: &MouseUpEvent, _, cx| {
                                         let position = event.position;
                                         let p = menu_path.clone();
                                         let _ = menu.update(cx, |this, cx| {
@@ -870,17 +942,42 @@ impl LibraryWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        const TOP: usize = 5;
         let query = self.search.read(cx).text().to_owned();
         let data = self.library.read(cx).data();
         let found = data.search(&query);
+        let words: Vec<String> = crate::library::fold(&query)
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
+        let playlists: Vec<(String, usize, Option<PathBuf>)> = self
+            .playlists
+            .read(cx)
+            .all()
+            .iter()
+            .filter(|p| {
+                let name = crate::library::fold(&p.name);
+                !words.is_empty() && words.iter().all(|w| name.contains(w.as_str()))
+            })
+            .map(|p| {
+                // The cover of the playlist's first track that has one.
+                let cover = p.tracks.iter().find_map(|t| {
+                    data.by_path
+                        .get(t)
+                        .and_then(|&i| data.albums[data.tracks[i].album_index].cover.clone())
+                });
+                (p.name.clone(), p.tracks.len(), cover)
+            })
+            .collect();
+        let more = self.search_more;
         let header = page_header(
             format!("Risultati per «{}»", query.trim()),
             None,
-            false,
+            more.is_some(),
             theme,
             cx,
         );
-        if found.is_empty() {
+        if found.is_empty() && playlists.is_empty() {
             return div()
                 .flex_1()
                 .flex()
@@ -890,21 +987,30 @@ impl LibraryWindow {
                     div()
                         .px(px(CONTENT_PAD))
                         .text_color(theme.muted)
-                        .child("Nessun brano, album o artista corrisponde."),
+                        .child("Nessun brano, artista, album o playlist corrisponde."),
                 )
                 .into_any_element();
         }
         let (_, card) = self.grid_columns(window, compact);
-        let card = card.min(170.);
+        let card = card.min(150.);
         let this = cx.entity().downgrade();
-        let paths: Vec<PathBuf> = found
+        let show = |section: SearchMore, total: usize| -> usize {
+            match more {
+                Some(m) if m == section => total,
+                Some(_) => 0,
+                None => total.min(TOP),
+            }
+        };
+
+        let all_tracks: Vec<PathBuf> = found
             .tracks
             .iter()
             .map(|&i| data.tracks[i].path.clone())
             .collect();
+        let shown_tracks = show(SearchMore::Tracks, all_tracks.len());
         let rows = self.track_rows(
             "search-track",
-            &paths,
+            &all_tracks[..shown_tracks],
             None,
             true,
             true,
@@ -913,19 +1019,111 @@ impl LibraryWindow {
             theme,
             cx,
             {
-                let paths = paths.clone();
+                let paths = all_tracks.clone();
                 move |this, i, cx| this.play_paths(paths.clone(), i, false, cx)
             },
         );
-        let section = |label: &'static str| {
+        let section = |label: &'static str,
+                       id: &'static str,
+                       total: usize,
+                       target: SearchMore,
+                       cx: &mut Context<Self>| {
             div()
                 .px(px(CONTENT_PAD))
                 .pt(px(8.))
                 .pb(px(10.))
-                .text_size(px(15.))
-                .font_weight(FontWeight::BOLD)
-                .child(label)
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(15.))
+                        .font_weight(FontWeight::BOLD)
+                        .child(label),
+                )
+                .when(more.is_none() && total > TOP, |d| {
+                    d.child(
+                        div()
+                            .id(id)
+                            .text_size(px(12.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(theme.text))
+                            .child(format!("Mostra tutti ({total})"))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.search_more = Some(target);
+                                cx.notify();
+                            })),
+                    )
+                })
         };
+
+        let shown_artists = show(SearchMore::Artists, found.artists.len());
+        let shown_albums = show(SearchMore::Collections, found.albums.len());
+        let shown_playlists = show(SearchMore::Collections, playlists.len());
+        let collections = found.albums.len() + playlists.len();
+        let playlist_card = |(name, count, cover_path): (String, usize, Option<PathBuf>)| {
+            let open = this.clone();
+            let target = name.clone();
+            let favorites = name == crate::playlists::FAVORITES;
+            div()
+                .id(SharedString::from(format!("search-playlist-{name}")))
+                .w(px(card))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .cursor_pointer()
+                .child(if favorites || cover_path.is_none() {
+                    div()
+                        .size(px(card))
+                        .rounded(px(8.))
+                        .bg(theme.accent_soft)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon(
+                            if favorites {
+                                "heart-filled"
+                            } else {
+                                "playlist"
+                            },
+                            card * 0.3,
+                            theme.accent_text,
+                        ))
+                        .into_any_element()
+                } else {
+                    cover(cover_path.as_deref(), Some(card), 8., theme).into_any_element()
+                })
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .truncate()
+                                .child(name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(theme.muted)
+                                .truncate()
+                                .child(format!(
+                                    "Playlist · {count} {}",
+                                    if count == 1 { "brano" } else { "brani" }
+                                )),
+                        ),
+                )
+                .on_click(move |_, _, cx| {
+                    let target = target.clone();
+                    let _ = open.update(cx, |this, cx| this.go(Page::Playlist(target), cx));
+                })
+        };
+
         div()
             .id("search-page")
             .flex_1()
@@ -933,18 +1131,47 @@ impl LibraryWindow {
             .overflow_y_scroll()
             .pb(px(24.))
             .child(header)
-            .when(!found.artists.is_empty(), |d| {
-                d.child(section("Artisti")).child(
-                    div().pb(px(12.)).children(
-                        found
-                            .artists
+            .when(shown_tracks > 0, |d| {
+                d.child(section(
+                    "Brani",
+                    "more-tracks",
+                    all_tracks.len(),
+                    SearchMore::Tracks,
+                    cx,
+                ))
+                .child(
+                    div()
+                        .px(px(CONTENT_PAD - 10.))
+                        .pb(px(14.))
+                        .child(table_header(true, compact, theme))
+                        .children(rows),
+                )
+            })
+            .when(shown_artists > 0, |d| {
+                d.child(section(
+                    "Artisti",
+                    "more-artists",
+                    found.artists.len(),
+                    SearchMore::Artists,
+                    cx,
+                ))
+                .child(
+                    div().pb(px(14.)).children(
+                        found.artists[..shown_artists]
                             .iter()
                             .map(|&i| artist_row(&data, i, theme, this.clone())),
                     ),
                 )
             })
-            .when(!found.albums.is_empty(), |d| {
-                d.child(section("Album")).child(
+            .when(shown_albums + shown_playlists > 0, |d| {
+                d.child(section(
+                    "Album e playlist",
+                    "more-collections",
+                    collections,
+                    SearchMore::Collections,
+                    cx,
+                ))
+                .child(
                     div()
                         .px(px(CONTENT_PAD))
                         .pb(px(18.))
@@ -952,19 +1179,16 @@ impl LibraryWindow {
                         .flex_wrap()
                         .gap(px(CARD_GAP))
                         .children(
-                            found
-                                .albums
+                            found.albums[..shown_albums]
                                 .iter()
                                 .map(|&a| Self::album_card(&data, a, card, theme, this.clone())),
+                        )
+                        .children(
+                            playlists
+                                .into_iter()
+                                .take(shown_playlists)
+                                .map(playlist_card),
                         ),
-                )
-            })
-            .when(!found.tracks.is_empty(), |d| {
-                d.child(section("Brani")).child(
-                    div()
-                        .px(px(CONTENT_PAD - 10.))
-                        .child(table_header(true, compact, theme))
-                        .children(rows),
                 )
             })
             .into_any_element()

@@ -5,15 +5,20 @@
 //! the DAC untouched whenever volume is at 100% and no processing is active.
 //!
 //! - [`Source`] opens and decodes a local file (FLAC, ALAC, WAV, AIFF, MP3, AAC, Vorbis, Opus).
-//! - [`Player`] plays a [`Source`] on the default output device.
+//! - [`Engine`] plays track after track on one output stream: gapless, equalizer, ReplayGain,
+//!   resampling when the device cannot follow the track's rate.
+//! - [`Player`] plays a single [`Source`] (used by the command-line tool).
 //! - [`output`] lists devices and chooses a stream configuration that matches the track.
 
 pub mod analysis;
+pub mod dsp;
+mod engine;
 mod error;
 pub mod output;
 mod player;
 mod source;
 
+pub use engine::{Engine, Loaded};
 pub use error::{EngineError, Result};
 pub use player::Player;
 pub use source::{Artwork, Source, TrackInfo, TrackTags};

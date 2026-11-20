@@ -4,7 +4,7 @@
 use gpui::{App, KeyBinding, PathPromptOptions, actions};
 
 use crate::playback::playback;
-use crate::settings::{MiniView, settings};
+use crate::settings::settings;
 
 actions!(
     lumifi,
@@ -14,7 +14,6 @@ actions!(
         Previous,
         ToggleShuffle,
         CycleRepeat,
-        CycleView,
         ToggleMute,
         VolumeUp,
         VolumeDown,
@@ -46,7 +45,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("m", ToggleMute, ctx),
         KeyBinding::new("s", ToggleShuffle, ctx),
         KeyBinding::new("r", CycleRepeat, ctx),
-        KeyBinding::new("v", CycleView, ctx),
         KeyBinding::new("t", ToggleOnTop, ctx),
         KeyBinding::new("secondary-,", OpenSettings, None),
         KeyBinding::new("secondary-f", FocusSearch, None),
@@ -82,16 +80,6 @@ pub fn register_global(cx: &mut App) {
     cx.on_action(|_: &VolumeDown, cx| {
         playback(cx).update(cx, |p, cx| p.set_volume(p.volume() - 0.05, cx));
         save_volume(cx);
-    });
-    cx.on_action(|_: &CycleView, cx| {
-        settings(cx).update(cx, |s, cx| {
-            s.update(cx, |v| {
-                v.mini_view = match v.mini_view {
-                    MiniView::A => MiniView::B,
-                    MiniView::B => MiniView::A,
-                }
-            })
-        });
     });
     cx.on_action(|_: &Open, cx| {
         let answer = cx.prompt_for_paths(PathPromptOptions {

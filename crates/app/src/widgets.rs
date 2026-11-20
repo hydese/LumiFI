@@ -136,13 +136,39 @@ pub fn slider(
     content: impl IntoElement,
     on_event: impl Fn(SlideEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    slider_along(id, dragging, false, content, on_event)
+}
+
+/// The same, upright: 1 at the top, 0 at the bottom.
+pub fn vertical_slider(
+    id: impl Into<ElementId>,
+    dragging: bool,
+    content: impl IntoElement,
+    on_event: impl Fn(SlideEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    slider_along(id, dragging, true, content, on_event)
+}
+
+fn slider_along(
+    id: impl Into<ElementId>,
+    dragging: bool,
+    vertical: bool,
+    content: impl IntoElement,
+    on_event: impl Fn(SlideEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
     let on_event = Rc::new(on_event);
     div().id(id).relative().child(content).child(
         canvas(
             |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
             move |bounds, hitbox, window, _| {
                 window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
-                let fraction = move |position: Point<Pixels>| fraction_at(bounds, position);
+                let fraction = move |position: Point<Pixels>| {
+                    if vertical {
+                        fraction_up(bounds, position)
+                    } else {
+                        fraction_at(bounds, position)
+                    }
+                };
                 let down = on_event.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                     if phase == DispatchPhase::Bubble
@@ -189,6 +215,11 @@ fn fraction_at(bounds: Bounds<Pixels>, position: Point<Pixels>) -> f32 {
     ((f32::from(position.x) - f32::from(bounds.origin.x)) / width).clamp(0.0, 1.0)
 }
 
+fn fraction_up(bounds: Bounds<Pixels>, position: Point<Pixels>) -> f32 {
+    let height = f32::from(bounds.size.height).max(1.0);
+    (1.0 - (f32::from(position.y) - f32::from(bounds.origin.y)) / height).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,5 +231,8 @@ mod tests {
         assert_eq!(fraction_at(bounds, point(px(200.), px(5.))), 0.5);
         assert_eq!(fraction_at(bounds, point(px(50.), px(5.))), 0.0);
         assert_eq!(fraction_at(bounds, point(px(900.), px(5.))), 1.0);
+        let upright = Bounds::new(point(px(0.), px(100.)), size(px(10.), px(200.)));
+        assert_eq!(fraction_up(upright, point(px(5.), px(100.))), 1.0);
+        assert_eq!(fraction_up(upright, point(px(5.), px(250.))), 0.25);
     }
 }

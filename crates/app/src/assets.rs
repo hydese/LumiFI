@@ -33,6 +33,7 @@ static ICONS: &[(&str, &[u8])] = icons![
     "heart-filled",
     "mic",
     "minimize",
+    "more",
     "next",
     "note",
     "pause",

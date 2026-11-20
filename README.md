@@ -3,7 +3,7 @@
 # LumiFi
 
 **Un music player piccolo, leggero e in alta qualità per macOS e Windows.**<br />
-La tua musica, come è stata registrata.
+Un music player piccolo e leggero, con audio lossless in alta qualità.
 
 [![CI](https://github.com/hydese/lumifi/actions/workflows/ci.yml/badge.svg)](https://github.com/hydese/lumifi/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL%20v3-3d6bf0)](LICENSE)
@@ -11,19 +11,20 @@ La tua musica, come è stata registrata.
 </div>
 
 > [!NOTE]
-> LumiFi è all'inizio. Oggi c'è il **mini player**: suona la tua musica locale, con copertina,
-> coda, casuale, ripeti, volume e due visualizzazioni. La libreria completa, l'equalizzatore e
-> Spotify arrivano nelle prossime versioni.
+> LumiFi è in sviluppo. Oggi ci sono la libreria, le playlist, la ricerca, i testi, il mini
+> player, l'equalizzatore a 10 bande e la riproduzione senza pause. Spotify arriva con la 1.0.
 
 ## L'idea
 
 - 🎧 **Alta qualità.** FLAC, ALAC, WAV, AIFF, MP3, AAC, Vorbis e Opus, anche hi-res. Il
-  dispositivo audio passa alla frequenza del brano, così il suono arriva al DAC senza ritocchi.
+  dispositivo audio passa alla frequenza del brano, così il suono arriva al DAC senza ritocchi;
+  se non può, un ricampionatore di alta qualità fa la conversione. Niente pause tra un brano e
+  l'altro (gapless) e volume uniforme con ReplayGain, se lo vuoi.
 - 🪶 **Leggero.** Scritto in Rust, poca memoria e avvio istantaneo.
 - 🟦 **Piccolo quando serve.** Un mini player che sta in un angolo dello schermo, come il
   vecchio Winamp, e si apre in una libreria completa quando vuoi cercare e organizzare.
-- 🎚️ **Equalizzatore vero.** Dieci bande per tutti, curva parametrica e profili AutoEq per chi
-  vuole di più.
+- 🎚️ **Equalizzatore vero.** Dieci bande con preamplificazione automatica (niente clipping),
+  salvato per ogni uscita audio; la curva parametrica e i profili AutoEq arrivano dopo.
 - 🔌 **Servizi a scelta.** Spotify, Apple Music e gli altri si attivano dalle impostazioni; se
   non li accendi, non li vedi.
 
@@ -50,23 +51,24 @@ cargo run --release -p lumifi -- ~/Music/Album     # parte subito con una cartel
 | ↑ / ↓ e rotella | Volume |
 | M | Silenzia |
 | S / R | Casuale / ripeti (tutto, un brano) |
-| V | Mini player: avanzamento A (barra) o B (forma d'onda) |
 | T | Mini player sempre in primo piano |
 | ⌘L / Ctrl+L | Libreria ⇄ mini player |
 | ⌘, / Ctrl+, | Impostazioni |
-| ⌘F / Ctrl+F | Cerca brani, album e artisti (Invio suona il primo, Esc chiude) |
+| ⌘F / Ctrl+F | Cerca brani, artisti, album e playlist (Invio suona il primo, Esc chiude) |
 | ⌘O / Ctrl+O | Apri file o cartelle |
 
 LumiFi si apre sulla **libreria**: album, artisti, brani e playlist, con la ricerca in alto e
 la barra di riproduzione in basso. Un clic su un brano lo suona, un altro clic lo mette in
-pausa; il tasto destro su brani e album li aggiunge alla coda o a una playlist. Il cuore li
-mette nei Preferiti. In basso a destra si aprono la **coda** e **In riproduzione**, con i
+pausa; il tasto destro (o il pulsante ⋯ sulla riga) su brani e album li aggiunge alla coda o
+a una playlist. Il cuore su ogni riga li mette nei Preferiti. In Brani, **Riproduci** e
+**Casuale** suonano tutta la libreria. In basso a destra si aprono la **coda** e **In riproduzione**, con i
 **testi sincronizzati** (da un file .lrc accanto al brano, dai tag, oppure da
 [LRCLIB](https://lrclib.net)).
 
 Il pulsante **Mini player** in alto (o Ctrl+L) la sostituisce con il mini player, a
 **striscia** o **quadrato**. Il mini player si sposta trascinandolo da un punto libero; con il
-**tasto destro** si sceglie la dimensione (75–200%), la posizione (libera o agganciata in alto
+**tasto destro** si sceglie la dimensione (striscia 75–150%, quadrato 25–150%: al 25% resta
+solo la copertina, con play al passaggio del mouse), la posizione (libera o agganciata in alto
 o in basso), la forma e "sempre in primo piano". La musica non si ferma quando cambi finestra,
 e all'avvio LumiFi riprende dall'ultimo brano, in pausa.
 
@@ -98,7 +100,7 @@ cargo run --release -p lumifi-cli -- devices
 | Cartella | Contenuto |
 | --- | --- |
 | `crates/app` | l'app LumiFi (interfaccia in [gpui](https://gpui.rs)) |
-| `crates/engine` | il motore audio: decodifica (Symphonia), uscita (cpal), forma d'onda |
+| `crates/engine` | il motore audio: decodifica (Symphonia), uscita sempre aperta (cpal), gapless, ricampionatore, equalizzatore, ReplayGain |
 | `crates/cli` | `lumifi-cli`, per provare il motore da terminale |
 | `packaging/` | come si impacchetta l'app per macOS |
 | `patches/` | dipendenze corrette in locale (vedi il README lì dentro) |
@@ -106,10 +108,12 @@ cargo run --release -p lumifi-cli -- devices
 ## Roadmap
 
 1. **v0.1 — Fondamenta:** motore, CI e release per macOS e Windows.
-2. **v0.2 — Mini player:** musica locale, coda, viste A/B.
+2. **v0.2 — Mini player:** musica locale, coda.
 3. **v0.3 — Libreria e interfaccia:** app completa, scansione delle cartelle, album e artisti,
-   impostazioni *(ora)*; poi playlist, ricerca, testi sincronizzati.
-4. **v0.6 — Qualità ed EQ:** modalità esclusiva, gapless, ReplayGain, equalizzatore e AutoEq.
+   impostazioni, playlist, ricerca, testi sincronizzati.
+4. **v0.6 — Qualità ed EQ** *(in corso)*: uscita sempre aperta, gapless, ricampionatore,
+   ReplayGain ed equalizzatore a 10 bande fatti; poi vista parametrica, AutoEq e modalità
+   esclusiva.
 5. **v1.0 — Servizi:** Spotify, telecomando di Music.app, Last.fm, aggiornamenti automatici.
 
 ## Licenza

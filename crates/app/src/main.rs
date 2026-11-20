@@ -70,13 +70,20 @@ fn main() {
         let resume = settings.resume;
         let volume = settings.volume;
         let folders = settings.folders.clone();
-        let (check_updates, beta) = (settings.check_updates, settings.beta);
-        SettingsModel::install(settings, cx);
+        let beta = settings.beta;
+        let settings_model = SettingsModel::install(settings, cx);
         let playback = Playback::install(volume, cx);
+        // The equalizer and ReplayGain follow the settings while the music plays.
+        let audio = playback.clone();
+        cx.observe(&settings_model, move |_, cx| {
+            audio.update(cx, |p, cx| p.settings_changed(cx));
+        })
+        .detach();
         Library::install(folders, cx);
         playlists::Playlists::install(cx);
         lyrics::LyricsModel::install(cx);
-        updates::Updates::install(check_updates, beta, cx);
+        // Always look for a new version; the settings only decide whether to ask first.
+        updates::Updates::install(true, beta, cx);
 
         actions::bind_keys(cx);
         text_input::bind_keys(cx);
@@ -131,7 +138,6 @@ fn main() {
                 items: vec![
                     MenuItem::action("Libreria / Mini player", ToggleLibrary),
                     MenuItem::action("Cerca", FocusSearch),
-                    MenuItem::action("Cambia avanzamento del mini player (A/B)", CycleView),
                     MenuItem::action("Sempre in primo piano", ToggleOnTop),
                 ],
             },

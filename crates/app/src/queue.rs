@@ -271,6 +271,25 @@ impl Queue {
         self.skip_forward()
     }
 
+    /// What `advance_on_end` would move to, without moving. `None` when the queue ends, and at
+    /// the wrap of a shuffled Repeat All (the order is drawn again then).
+    pub fn peek_after_end(&self) -> Option<&Path> {
+        if self.tracks.is_empty() {
+            return None;
+        }
+        if self.repeat == Repeat::One {
+            return self.current();
+        }
+        let index = if self.position + 1 < self.order.len() {
+            self.order[self.position + 1]
+        } else if self.repeat == Repeat::All && !self.shuffle {
+            self.order[0]
+        } else {
+            return None;
+        };
+        Some(self.tracks[index].as_path())
+    }
+
     /// The Next button: always moves on, wrapping only with Repeat All.
     pub fn skip_forward(&mut self) -> Option<&Path> {
         if self.tracks.is_empty() {

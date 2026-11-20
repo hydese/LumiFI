@@ -75,7 +75,7 @@ impl SearchResults {
 }
 
 /// Lower case without accents, so "citta" finds "Città".
-fn fold(text: &str) -> String {
+pub(crate) fn fold(text: &str) -> String {
     text.chars()
         .flat_map(char::to_lowercase)
         .map(|c| match c {
@@ -243,35 +243,82 @@ impl LibraryData {
         data
     }
 
-    /// Every word of `query` must appear in the title, artist or album.
+    /// Every word of `query` must appear somewhere; results come best first. A title that is
+    /// the query beats one that starts with it, which beats one that contains it, and a match in
+    /// the title beats one only in the artist or the album.
     pub fn search(&self, query: &str) -> SearchResults {
-        let words: Vec<String> = fold(query).split_whitespace().map(str::to_owned).collect();
+        let folded = fold(query);
+        let query = folded.split_whitespace().collect::<Vec<_>>().join(" ");
+        let words: Vec<&str> = query.split(' ').filter(|w| !w.is_empty()).collect();
         if words.is_empty() {
             return SearchResults::default();
         }
-        let matches = |haystack: &str| {
-            let haystack = fold(haystack);
-            words.iter().all(|w| haystack.contains(w.as_str()))
+        let all_in = |haystack: &str| words.iter().all(|w| haystack.contains(w));
+        // How well one field matches: 0 when it does not.
+        let field = |text: &str| -> u32 {
+            let text = fold(text);
+            if text == query {
+                100
+            } else if text.starts_with(&query) {
+                80
+            } else if text
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|w| w.starts_with(&query))
+            {
+                65
+            } else if text.contains(&query) {
+                55
+            } else if all_in(&text) {
+                40
+            } else {
+                0
+            }
         };
+        let ranked = |mut scored: Vec<(u32, usize, String)>, limit: usize| -> Vec<usize> {
+            scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
+            scored.into_iter().take(limit).map(|(_, i, _)| i).collect()
+        };
+
+        let artists = (0..self.artists.len())
+            .filter_map(|i| {
+                let name = &self.artists[i].name;
+                let score = field(name);
+                (score > 0).then(|| (score, i, fold(name)))
+            })
+            .collect();
+        let albums = (0..self.albums.len())
+            .filter_map(|i| {
+                let a = &self.albums[i];
+                let score = field(&a.title) * 2;
+                let score = if score > 0 {
+                    score
+                } else if all_in(&fold(&format!("{} {}", a.title, a.artist))) {
+                    field(&a.artist).max(20)
+                } else {
+                    0
+                };
+                (score > 0).then(|| (score, i, fold(&a.title)))
+            })
+            .collect();
+        let tracks = (0..self.tracks.len())
+            .filter_map(|i| {
+                let t = &self.tracks[i];
+                let title = field(&t.title);
+                let score = if title > 0 {
+                    // Any title match outranks a match only in artist or album.
+                    200 + title
+                } else if all_in(&fold(&format!("{} {} {}", t.title, t.artist, t.album))) {
+                    field(&t.artist).max(field(&t.album) / 2).max(10)
+                } else {
+                    0
+                };
+                (score > 0).then(|| (score, i, fold(&t.title)))
+            })
+            .collect();
         SearchResults {
-            artists: (0..self.artists.len())
-                .filter(|&i| matches(&self.artists[i].name))
-                .take(8)
-                .collect(),
-            albums: (0..self.albums.len())
-                .filter(|&i| {
-                    let a = &self.albums[i];
-                    matches(&format!("{} {}", a.title, a.artist))
-                })
-                .take(12)
-                .collect(),
-            tracks: (0..self.tracks.len())
-                .filter(|&i| {
-                    let t = &self.tracks[i];
-                    matches(&format!("{} {} {}", t.title, t.artist, t.album))
-                })
-                .take(100)
-                .collect(),
+            artists: ranked(artists, 50),
+            albums: ranked(albums, 60),
+            tracks: ranked(tracks, 200),
         }
     }
 
@@ -425,6 +472,41 @@ mod tests {
             data.by_path[std::path::Path::new("/m/b.flac")],
             data.search("faint").tracks[0]
         );
+    }
+
+    #[test]
+    fn search_puts_the_best_title_first() {
+        let mut tracks = Vec::new();
+        for (i, (title, artist)) in [
+            ("Love Story Remix", "Someone"),
+            ("Endless Love", "Duo"),
+            ("Love", "Band"),
+            ("Song", "Love Inc"),
+            ("Lovely", "Band"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut r = row(
+                &format!("/m/{i}.flac"),
+                Some(artist),
+                Some("Album"),
+                Some(i as u32),
+            );
+            r.title = Some(title.into());
+            tracks.push(r);
+        }
+        let data = LibraryData::build(tracks);
+        let titles: Vec<&str> = data
+            .search("love")
+            .tracks
+            .iter()
+            .map(|&i| data.tracks[i].title.as_ref())
+            .collect();
+        assert_eq!(titles[0], "Love");
+        // Exact, then the prefixes, then a word inside, and the artist-only match last.
+        assert_eq!(titles[3], "Endless Love");
+        assert_eq!(titles[4], "Song");
     }
 
     #[test]

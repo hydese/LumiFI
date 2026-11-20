@@ -7,13 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{App, AppContext, Context, Entity, Global, Image, ImageFormat, SharedString, Task};
-use lumifi_engine::{Artwork, Player, analysis};
+use lumifi_engine::{Artwork, Engine, Loaded, Source};
 
 use crate::queue::{Queue, QueueState, Repeat, collect_audio};
 use crate::settings::{GlobalSettings, Paths};
-
-/// How many peaks the waveform view draws.
-pub const WAVE_BARS: usize = 56;
 
 /// Paths handed over by the system ("Open with LumiFi") until playback picks them up.
 static OPENED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
@@ -50,19 +47,25 @@ struct Session {
 
 pub struct Playback {
     queue: Queue,
-    player: Option<Player>,
+    engine: Engine,
+    /// A track is open in the engine.
+    loaded: bool,
+    /// The track queued in the engine to follow without a pause.
+    gapless_next: Option<PathBuf>,
+    /// The engine's `track_index` the app has caught up with.
+    heard_index: usize,
+    /// "Ascolta senza": the equalizer is skipped for a moment, to compare.
+    eq_bypass: bool,
     now: Option<NowPlaying>,
     paused: bool,
     volume: f32,
     muted: bool,
-    waveform: Vec<f32>,
     error: Option<SharedString>,
     /// Position at the last notification, so observers redraw only when the clock moved.
     notified_position: Duration,
     /// Position at the last session save.
     saved_position: Duration,
     _ticker: Task<()>,
-    _waveform_job: Option<Task<()>>,
 }
 
 /// Lets any part of the app reach the one `Playback`.
@@ -97,17 +100,19 @@ impl Playback {
             .unwrap_or(0x9E37_79B9);
         Self {
             queue: Queue::new(seed),
-            player: None,
+            engine: Engine::new(),
+            loaded: false,
+            gapless_next: None,
+            heard_index: 0,
+            eq_bypass: false,
             now: None,
             paused: true,
             volume: volume.clamp(0.0, 1.0),
             muted: false,
-            waveform: Vec::new(),
             error: None,
             notified_position: Duration::ZERO,
             saved_position: Duration::ZERO,
             _ticker: ticker,
-            _waveform_job: None,
         }
     }
 
@@ -126,9 +131,19 @@ impl Playback {
         self.volume
     }
 
-    /// The volume that reaches the speakers: 0 when muted.
+    /// The gain that reaches the speakers: 0 when muted. The slider follows the ear, not the
+    /// amplitude: a cube gives about −18 dB at half way and −60 dB near the bottom, so every
+    /// step of the slider sounds about as big as the last.
     pub fn effective_volume(&self) -> f32 {
-        if self.muted { 0.0 } else { self.volume }
+        if self.muted {
+            0.0
+        } else {
+            perceptual_gain(self.volume)
+        }
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.muted
     }
 
     pub fn repeat(&self) -> Repeat {
@@ -137,10 +152,6 @@ impl Playback {
 
     pub fn is_shuffled(&self) -> bool {
         self.queue.is_shuffled()
-    }
-
-    pub fn waveform(&self) -> &[f32] {
-        &self.waveform
     }
 
     pub fn error(&self) -> Option<SharedString> {
@@ -152,9 +163,16 @@ impl Playback {
     }
 
     pub fn position(&self) -> Duration {
-        self.player
-            .as_ref()
-            .map_or(Duration::ZERO, |p| p.position())
+        if self.loaded {
+            self.engine.position()
+        } else {
+            Duration::ZERO
+        }
+    }
+
+    /// The output device and the rate the stream runs at, while something is loaded.
+    pub fn output_description(&self) -> Option<(String, u32)> {
+        self.engine.output_description()
     }
 
     /// How far through the track, from 0 to 1.
@@ -196,24 +214,20 @@ impl Playback {
     /// Opens `path` at `start`. Keeps the player paused when `play` is false.
     fn load(&mut self, path: &Path, start: Duration, play: bool, cx: &mut Context<Self>) {
         log::info!("load {} at {:?} (play: {play})", path.display(), start);
-        self.player = None;
-        let device = cx
-            .try_global::<GlobalSettings>()
-            .and_then(|s| s.0.read(cx).value.output_device.clone());
-        match Player::play_on(path, start, self.effective_volume(), device.as_deref()) {
-            Ok(player) => {
-                if !play {
-                    player.pause();
-                }
+        self.apply_audio_settings(cx);
+        self.engine.set_volume(self.effective_volume());
+        match self.engine.load(path, start, play) {
+            Ok(loaded) => {
                 let same_track = self.now.as_ref().is_some_and(|n| n.path == path);
                 if !same_track {
-                    self.now = Some(describe(path, &player));
-                    self.waveform.clear();
-                    self.start_waveform(path.to_path_buf(), cx);
+                    self.now = Some(describe(&loaded));
                 }
+                self.loaded = true;
                 self.paused = !play;
-                self.player = Some(player);
                 self.error = None;
+                self.gapless_next = None;
+                self.heard_index = 0;
+                self.queue_gapless();
                 self.save_session();
             }
             Err(error) => {
@@ -222,6 +236,8 @@ impl Playback {
                     "Non riesco a suonare {}",
                     file_name(path)
                 )));
+                self.engine.clear();
+                self.loaded = false;
                 self.now = None;
                 self.paused = true;
             }
@@ -229,19 +245,44 @@ impl Playback {
         cx.notify();
     }
 
-    fn start_waveform(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let job_path = path.clone();
-        let job = cx.background_spawn(async move { analysis::waveform(&job_path, WAVE_BARS) });
-        self._waveform_job = Some(cx.spawn(async move |this, cx| {
-            if let Ok(peaks) = job.await {
-                let _ = this.update(cx, |this, cx| {
-                    if this.now.as_ref().is_some_and(|n| n.path == path) {
-                        this.waveform = peaks;
-                        cx.notify();
-                    }
-                });
-            }
-        }));
+    /// Device, ReplayGain and equalizer as the settings say.
+    fn apply_audio_settings(&mut self, cx: &mut Context<Self>) {
+        let Some(settings) = cx
+            .try_global::<GlobalSettings>()
+            .map(|s| s.0.read(cx).value.clone())
+        else {
+            return;
+        };
+        self.engine.set_device(settings.output_device.clone());
+        self.engine.set_replaygain(settings.replaygain.engine());
+        let mut eq = settings.eq_profile().engine();
+        eq.enabled &= !self.eq_bypass;
+        self.engine.set_eq(eq);
+    }
+
+    pub fn eq_bypassed(&self) -> bool {
+        self.eq_bypass
+    }
+
+    pub fn toggle_eq_bypass(&mut self, cx: &mut Context<Self>) {
+        self.eq_bypass = !self.eq_bypass;
+        self.apply_audio_settings(cx);
+        cx.notify();
+    }
+
+    /// The equalizer or ReplayGain changed: the equalizer follows at once, ReplayGain from the
+    /// next track.
+    pub fn settings_changed(&mut self, cx: &mut Context<Self>) {
+        self.apply_audio_settings(cx);
+    }
+
+    /// Tells the engine which track follows, so it can go on without a gap.
+    fn queue_gapless(&mut self) {
+        let next = self.queue.peek_after_end().map(Path::to_path_buf);
+        if next != self.gapless_next {
+            self.engine.set_next(next.clone());
+            self.gapless_next = next;
+        }
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {
@@ -252,18 +293,42 @@ impl Playback {
         if !opened.is_empty() {
             self.open_paths(opened, cx);
         }
-        let Some(player) = &self.player else {
+        if !self.loaded {
             return;
-        };
-        if player.is_finished() {
+        }
+        // The engine went on to the next track by itself: follow it.
+        let index = self.engine.track_index();
+        if index > self.heard_index
+            && let Some(heard) = self.engine.current_path()
+        {
+            self.heard_index = index;
+            self.queue.advance_on_end();
+            self.gapless_next = None;
+            self.now = Source::open(&heard).ok().map(|source| {
+                describe(&Loaded {
+                    path: heard.clone(),
+                    info: source.info().clone(),
+                    tags: source.tags().clone(),
+                    artwork: source.artwork().cloned(),
+                })
+            });
+            self.queue_gapless();
+            self.save_session();
+            cx.notify();
+            return;
+        }
+        if self.engine.is_finished() {
             match self.queue.advance_on_end().map(Path::to_path_buf) {
                 Some(next) => self.load(&next, Duration::ZERO, true, cx),
                 None => {
                     // End of the queue: back to the first track, paused.
-                    self.player = None;
                     self.paused = true;
                     if let Some(first) = self.queue.rewind().map(Path::to_path_buf) {
                         self.load(&first, Duration::ZERO, false, cx);
+                    } else {
+                        self.engine.clear();
+                        self.loaded = false;
+                        cx.notify();
                     }
                 }
             }
@@ -273,7 +338,7 @@ impl Playback {
             return;
         }
         // The clock and the bars: a few redraws a second are enough.
-        let position = player.position();
+        let position = self.engine.position();
         if position.abs_diff(self.notified_position) >= Duration::from_millis(250) {
             self.notified_position = position;
             cx.notify();
@@ -299,6 +364,7 @@ impl Playback {
 
     pub fn remove_from_queue(&mut self, position: usize, cx: &mut Context<Self>) {
         if self.queue.remove_at(position) {
+            self.queue_gapless();
             self.save_session();
             cx.notify();
         }
@@ -306,6 +372,7 @@ impl Playback {
 
     pub fn move_in_queue(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
         self.queue.move_item(from, to);
+        self.queue_gapless();
         self.save_session();
         cx.notify();
     }
@@ -317,6 +384,7 @@ impl Playback {
             return;
         }
         self.queue.insert_next(paths);
+        self.queue_gapless();
         self.save_session();
         cx.notify();
     }
@@ -328,6 +396,7 @@ impl Playback {
             return;
         }
         self.queue.append(paths);
+        self.queue_gapless();
         self.save_session();
         cx.notify();
     }
@@ -384,20 +453,18 @@ impl Playback {
     // Controls ----------------------------------------------------------------------------
 
     pub fn toggle_play(&mut self, cx: &mut Context<Self>) {
-        if self.player.is_none() {
+        if !self.loaded {
             if let Some(path) = self.queue.current().map(Path::to_path_buf) {
                 self.load(&path, Duration::ZERO, true, cx);
             }
             return;
         }
-        if let Some(player) = &self.player {
-            if self.paused {
-                player.resume();
-            } else {
-                player.pause();
-            }
-            self.paused = !self.paused;
+        if self.paused {
+            self.engine.resume();
+        } else {
+            self.engine.pause();
         }
+        self.paused = !self.paused;
         self.save_session();
         cx.notify();
     }
@@ -426,11 +493,13 @@ impl Playback {
     pub fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
         let on = !self.queue.is_shuffled();
         self.queue.set_shuffle(on);
+        self.queue_gapless();
         cx.notify();
     }
 
     pub fn cycle_repeat(&mut self, cx: &mut Context<Self>) {
         self.queue.repeat = self.queue.repeat.next();
+        self.queue_gapless();
         cx.notify();
     }
 
@@ -446,9 +515,7 @@ impl Playback {
     }
 
     fn apply_volume(&mut self, cx: &mut Context<Self>) {
-        if let Some(player) = &self.player {
-            player.set_volume(self.effective_volume());
-        }
+        self.engine.set_volume(self.effective_volume());
         cx.notify();
     }
 
@@ -458,9 +525,21 @@ impl Playback {
         };
         let end = now.duration.unwrap_or(Duration::MAX);
         let position = position.min(end.saturating_sub(Duration::from_millis(200)));
-        let path = now.path.clone();
-        let play = !self.paused;
-        self.load(&path, position, play, cx);
+        if !self.loaded {
+            let path = now.path.clone();
+            self.load(&path, position, false, cx);
+            return;
+        }
+        match self.engine.seek(position) {
+            Ok(_) => {
+                self.heard_index = 0;
+                self.gapless_next = None;
+                self.queue_gapless();
+                self.notified_position = position;
+            }
+            Err(error) => log::warn!("seek failed: {error}"),
+        }
+        cx.notify();
     }
 
     /// Seeks to `fraction` (0 to 1) of the track.
@@ -481,9 +560,15 @@ impl Playback {
     }
 }
 
+/// Amplitude for a slider position: a cube, so the slider moves evenly to the ear.
+pub fn perceptual_gain(volume: f32) -> f32 {
+    volume.clamp(0.0, 1.0).powi(3)
+}
+
 /// Builds the title, subtitle and cover from the tags, falling back to the file name.
-fn describe(path: &Path, player: &Player) -> NowPlaying {
-    let tags = player.tags();
+fn describe(loaded: &Loaded) -> NowPlaying {
+    let path = loaded.path.as_path();
+    let tags = &loaded.tags;
     let title = tags
         .title
         .clone()
@@ -506,9 +591,9 @@ fn describe(path: &Path, player: &Player) -> NowPlaying {
         album: tags.album.clone().map(Into::into),
         lyrics: tags.lyrics.clone(),
         subtitle: subtitle.into(),
-        cover: player.artwork().and_then(cover_image),
-        duration: player.info().duration(),
-        quality: quality(player.info()).into(),
+        cover: loaded.artwork.as_ref().and_then(cover_image),
+        duration: loaded.info.duration(),
+        quality: quality(&loaded.info).into(),
     }
 }
 

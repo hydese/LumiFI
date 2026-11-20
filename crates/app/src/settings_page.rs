@@ -11,10 +11,14 @@ use lumifi_engine::output::{DeviceInfo, list_devices};
 
 use crate::library::{Library, library};
 use crate::playback::playback;
-use crate::settings::{MiniStyle, MiniView, Settings, SettingsModel, StartWith, settings};
+use crate::settings::{
+    EQ_PRESETS, GainMode, MiniStyle, Settings, SettingsModel, StartWith, settings,
+};
 use crate::theme::{Theme, ThemeMode};
 use crate::updates::{UpdateState, updates};
-use crate::widgets::{badge, icon, logo, radio, segment, segments, switch};
+use crate::widgets::{
+    SlideEvent, badge, icon, logo, radio, segment, segments, switch, vertical_slider,
+};
 
 const REPOSITORY: &str = "https://github.com/hydese/LumiFI";
 const RELEASES: &str = "https://github.com/hydese/LumiFI/releases";
@@ -67,6 +71,8 @@ pub struct SettingsPage {
     library: Entity<Library>,
     /// Output devices, read once when the window opens (and on "Aggiorna").
     devices: Option<Vec<DeviceInfo>>,
+    /// The equalizer band being dragged.
+    eq_drag: Option<usize>,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -78,12 +84,14 @@ impl SettingsPage {
             cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
             cx.observe(&settings, |_, _, cx| cx.notify()),
             cx.observe(&library, |_, _, cx| cx.notify()),
+            cx.observe(&playback(cx), |_, _, cx| cx.notify()),
         ];
         let mut this = Self {
             section,
             settings,
             library,
             devices: None,
+            eq_drag: None,
             _subscriptions: subscriptions,
         };
         this.refresh_devices(cx);
@@ -165,7 +173,7 @@ impl SettingsPage {
             Section::General => self.general(&value, &theme, cx),
             Section::Audio => self.audio(&value, &theme, cx),
             Section::Library => self.library_page(&value, &theme, cx),
-            Section::Equalizer => equalizer(&theme),
+            Section::Equalizer => self.equalizer(&value, &theme, cx),
             Section::Services => services(&theme),
             Section::Appearance => self.appearance(&value, &theme, cx),
             Section::About => about(&theme, cx),
@@ -366,7 +374,6 @@ impl SettingsPage {
         let version = format!("LumiFi {}", env!("CARGO_PKG_VERSION"));
         let start = value.start_with;
         let resume = value.resume;
-        let check_updates = value.check_updates;
         let beta = value.beta;
         let update_state = updates(cx).read(cx).state.clone();
         let update_status: SharedString = match &update_state {
@@ -405,6 +412,7 @@ impl SettingsPage {
                 .rounded(px(9.))
                 .border_1()
                 .border_color(theme.hairline)
+                .items_start()
                 .child(radio(selected, theme).mt(px(2.)))
                 .child(
                     div()
@@ -451,17 +459,6 @@ impl SettingsPage {
                         .child(update_button)
                         .into_any_element(),
                     row(
-                        "Cerca aggiornamenti all'avvio",
-                        Some("Controlla le release su GitHub ogni volta che apri LumiFi."),
-                        switch(check_updates, theme).id("check-updates").on_click(cx.listener(
-                            |this, _: &ClickEvent, _, cx| {
-                                this.change(cx, |v| v.check_updates = !v.check_updates)
-                            },
-                        )),
-                        theme,
-                    )
-                    .into_any_element(),
-                    row(
                         "Versioni beta",
                         Some("Ricevi le novità prima degli altri. Possono avere qualche difetto; torni alla versione stabile quando vuoi."),
                         switch(beta, theme).id("beta").on_click(cx.listener(
@@ -482,22 +479,27 @@ impl SettingsPage {
                         .gap(px(8.))
                         .child(
                             div()
-                                .flex()
-                                .justify_between()
-                                .items_center()
                                 .child("Come installare le nuove versioni")
-                                .child(badge("In arrivo", theme)),
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(theme.muted)
+                                        .child("LumiFi controlla a ogni avvio se c'è una versione nuova."),
+                                ),
                         )
                         .child(
                             div()
                                 .flex()
                                 .gap(px(8.))
-                                .opacity(0.55)
-                                .child(install_card(
-                                    "Automaticamente",
-                                    "Scaricate in silenzio e installate quando chiudi LumiFi.",
-                                    false,
-                                ))
+                                .child(
+                                    install_card(
+                                        "Automaticamente",
+                                        "Scaricate in silenzio e installate quando chiudi LumiFi.",
+                                        false,
+                                    )
+                                    .opacity(0.55)
+                                    .child(badge("In arrivo", theme)),
+                                )
                                 .child(install_card(
                                     "Chiedimi prima",
                                     "LumiFi ti avvisa e installa quando fai clic.",
@@ -620,6 +622,26 @@ impl SettingsPage {
             outputs.push(row("Cerco i dispositivi…", None, div(), theme).into_any_element());
         }
         let show_quality = value.show_quality;
+        let gain = value.replaygain;
+        let gain_segment =
+            |id: &'static str, label: &'static str, mode: GainMode, cx: &mut Context<Self>| {
+                segment(id, label, gain == mode, theme).on_click(cx.listener(
+                    move |this, _: &ClickEvent, _, cx| this.change(cx, |v| v.replaygain = mode),
+                ))
+            };
+        let stream_note: Option<SharedString> =
+            playback(cx)
+                .read(cx)
+                .output_description()
+                .map(|(device, rate)| {
+                    let khz = rate as f32 / 1000.0;
+                    let khz = if khz.fract() == 0.0 {
+                        format!("{khz:.0}")
+                    } else {
+                        format!("{khz:.1}").replace('.', ",")
+                    };
+                    format!("Ora: {device} a {khz} kHz.").into()
+                });
 
         div()
             .w_full()
@@ -639,13 +661,20 @@ impl SettingsPage {
                     ),
             )
             .child(group("Uscita", theme, outputs))
+            .children(stream_note.map(|note| {
+                div()
+                    .mt(px(-10.))
+                    .text_size(px(12.))
+                    .text_color(theme.muted)
+                    .child(note)
+            }))
             .child(group(
                 "Riproduzione",
                 theme,
                 vec![
                     row(
                         "Adatta la frequenza al brano",
-                        Some("Il dispositivo passa alla frequenza di ogni file, che arriva così com'è."),
+                        Some("Il dispositivo passa alla frequenza di ogni file, che arriva così com'è. Se non può, LumiFi converte con un ricampionatore di alta qualità."),
                         badge("Sempre attivo", theme),
                         theme,
                     )
@@ -660,7 +689,7 @@ impl SettingsPage {
                     row(
                         "Riproduzione senza pause",
                         Some("Niente silenzio tra i brani di un album dal vivo o di un concept."),
-                        badge("In arrivo", theme),
+                        badge("Sempre attivo", theme),
                         theme,
                     )
                     .into_any_element(),
@@ -677,8 +706,11 @@ impl SettingsPage {
                     .into_any_element(),
                     row(
                         "Normalizzazione del volume (ReplayGain)",
-                        Some("Brani e album suonano allo stesso volume, senza schiacciare la dinamica."),
-                        badge("In arrivo", theme),
+                        Some("Brani e album suonano allo stesso volume, senza schiacciare la dinamica. Usa i valori scritti nei file; vale dal brano successivo."),
+                        segments(theme)
+                            .child(gain_segment("rg-off", "Spenta", GainMode::Off, cx))
+                            .child(gain_segment("rg-track", "Brano", GainMode::Track, cx))
+                            .child(gain_segment("rg-album", "Album", GainMode::Album, cx)),
                         theme,
                     )
                     .into_any_element(),
@@ -796,7 +828,6 @@ impl SettingsPage {
     fn appearance(&self, value: &Settings, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let mode = value.theme;
         let style = value.mini_style;
-        let view = value.mini_view;
         let on_top = value.always_on_top;
         let theme_segment = |id: &'static str,
                              label: &'static str,
@@ -833,7 +864,7 @@ impl SettingsPage {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(mini_preview(s, view, theme)),
+                            .child(mini_preview(s, theme)),
                     )
                     .child(
                         div()
@@ -844,7 +875,10 @@ impl SettingsPage {
                             .child(div().font_weight(FontWeight::SEMIBOLD).child(label)),
                     )
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.change(cx, |v| v.mini_style = s)
+                        this.change(cx, |v| {
+                            v.mini_style = s;
+                            v.mini_scale = crate::settings::fit_scale(s, v.mini_scale);
+                        })
                     }))
             };
         div()
@@ -894,26 +928,6 @@ impl SettingsPage {
                 theme,
                 vec![
                     row(
-                        "Avanzamento nel mini player",
-                        Some("La barra classica o la forma d'onda del brano."),
-                        segments(theme)
-                            .child(
-                                segment("view-a", "A · Barra", view == MiniView::A, theme).on_click(
-                                    cx.listener(|this, _: &ClickEvent, _, cx| {
-                                        this.change(cx, |v| v.mini_view = MiniView::A)
-                                    }),
-                                ),
-                            )
-                            .child(
-                                segment("view-b", "B · Forma d'onda", view == MiniView::B, theme)
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                        this.change(cx, |v| v.mini_view = MiniView::B)
-                                    })),
-                            ),
-                        theme,
-                    )
-                    .into_any_element(),
-                    row(
                         "Sempre in primo piano",
                         Some("Il mini player resta sopra le altre finestre. Anche con la puntina sul player o il tasto T. La dimensione si sceglie col tasto destro sul mini player."),
                         switch(on_top, theme).id("on-top").on_click(cx.listener(
@@ -930,9 +944,9 @@ impl SettingsPage {
     }
 }
 
-/// A tiny drawing of each mini player shape, for the choice in Aspetto. It follows the A/B
-/// choice, and shows the square at rest (only the title and the bar).
-fn mini_preview(style: MiniStyle, view: MiniView, theme: &Theme) -> AnyElement {
+/// A tiny drawing of each mini player shape, for the choice in Aspetto. The square is shown at
+/// rest (only the title and the bar).
+fn mini_preview(style: MiniStyle, theme: &Theme) -> AnyElement {
     let logo_box = |size: f32| {
         div()
             .size_full()
@@ -942,8 +956,8 @@ fn mini_preview(style: MiniStyle, view: MiniView, theme: &Theme) -> AnyElement {
             .justify_center()
             .child(icon("waves", size, theme.on_accent))
     };
-    let progress = |bars: usize, h: f32| match view {
-        MiniView::A => div().h(px(h)).flex().items_center().child(
+    let progress = |_bars: usize, h: f32| {
+        div().h(px(h)).flex().items_center().child(
             div()
                 .w_full()
                 .h(px(3.))
@@ -954,26 +968,9 @@ fn mini_preview(style: MiniStyle, view: MiniView, theme: &Theme) -> AnyElement {
                         .h_full()
                         .w(gpui::relative(0.4))
                         .rounded(px(1.5))
-                        .bg(theme.text),
+                        .bg(theme.accent),
                 ),
-        ),
-        MiniView::B => div()
-            .h(px(h))
-            .flex()
-            .items_center()
-            .gap(px(1.5))
-            .children((0..bars).map(move |i| {
-                let peak = 0.3 + 0.7 * ((i as f32 * 0.6).sin() * (i as f32 * 0.21).cos()).abs();
-                div()
-                    .flex_1()
-                    .h(px(2.0 + peak * (h - 2.0)))
-                    .rounded(px(1.))
-                    .bg(if i < bars * 2 / 5 {
-                        theme.accent
-                    } else {
-                        theme.unplayed
-                    })
-            })),
+        )
     };
     match style {
         MiniStyle::Strip => div()
@@ -1039,27 +1036,476 @@ fn mini_preview(style: MiniStyle, view: MiniView, theme: &Theme) -> AnyElement {
     }
 }
 
-fn equalizer(theme: &Theme) -> AnyElement {
-    div()
-        .w_full()
-        .flex()
-        .flex_col()
-        .gap(px(18.))
-        .child(
+// Equalizzatore -----------------------------------------------------------------------------
+
+/// "+4,5 dB", "−2 dB", "0 dB".
+fn format_db(db: f32) -> String {
+    let rounded = (db * 10.0).round() / 10.0;
+    let sign = if rounded > 0.0 {
+        "+"
+    } else if rounded < 0.0 {
+        "−"
+    } else {
+        ""
+    };
+    let number = format!("{}", rounded.abs()).replace('.', ",");
+    format!("{sign}{number} dB")
+}
+
+fn band_label(frequency: f32) -> String {
+    if frequency >= 1000.0 {
+        format!("{}k", frequency / 1000.0)
+    } else {
+        format!("{frequency}")
+    }
+}
+
+/// Where a frequency sits across the graph, 0 to 1 (20 Hz to 20 kHz, logarithmic).
+fn graph_x(frequency: f32) -> f32 {
+    (frequency.log10() - 20f32.log10()) / 3.0
+}
+
+/// Where a gain sits down the graph, 0 to 1 (+12 dB at the top, −12 dB at the bottom).
+fn graph_y(db: f32) -> f32 {
+    (12.0 - db.clamp(-12.0, 12.0)) / 24.0
+}
+
+impl SettingsPage {
+    fn set_band(&mut self, band: usize, event: SlideEvent, cx: &mut Context<Self>) {
+        let (fraction, done) = match event {
+            SlideEvent::Move(f) => (f, false),
+            SlideEvent::End(f) => (f, true),
+        };
+        let gain = (((fraction * 2.0 - 1.0) * 12.0) * 2.0).round() / 2.0;
+        self.eq_drag = (!done).then_some(band);
+        let change = move |v: &mut Settings| {
+            let profile = v.eq_profile_mut();
+            profile.gains[band] = gain;
+            profile.enabled = true;
+        };
+        self.settings.update(cx, |s, cx| {
+            if done {
+                s.update(cx, change)
+            } else {
+                s.update_quietly(cx, change)
+            }
+        });
+    }
+
+    fn equalizer(&self, value: &Settings, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let profile = value.eq_profile();
+        let enabled = profile.enabled;
+        let gains = profile.gains;
+        let bypass = playback(cx).read(cx).eq_bypassed();
+        let device: SharedString = value
+            .output_device
+            .clone()
+            .unwrap_or_else(|| "uscita di sistema".into())
+            .into();
+        let settings_now = lumifi_engine::dsp::EqSettings {
+            enabled: true,
+            gains,
+        };
+        let preamp = settings_now.preamp_db();
+        let preset = EQ_PRESETS
+            .iter()
+            .find(|(_, curve)| curve.iter().zip(gains).all(|(a, b)| (a - b).abs() < 0.01))
+            .map(|(name, _)| *name);
+        let accent = theme.accent;
+        let line = if enabled { theme.accent } else { theme.muted };
+        let grid = theme.hairline;
+        let zero = theme.hairline_strong;
+        let area = gpui::Rgba {
+            a: if enabled { 0.16 } else { 0.08 },
+            ..line
+        };
+
+        // The response curve, drawn as in the design.
+        let graph = gpui::canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                let left = f32::from(bounds.origin.x);
+                let top = f32::from(bounds.origin.y);
+                let width = f32::from(bounds.size.width);
+                let height = f32::from(bounds.size.height);
+                let at =
+                    |fx: f32, fy: f32| gpui::point(px(left + fx * width), px(top + fy * height));
+                for f in [
+                    20., 50., 100., 200., 500., 1000., 2000., 5000., 10000., 20000.,
+                ] {
+                    let mut b = gpui::PathBuilder::stroke(px(1.));
+                    b.move_to(at(graph_x(f), 0.0));
+                    b.line_to(at(graph_x(f), 1.0));
+                    if let Ok(path) = b.build() {
+                        window.paint_path(path, grid);
+                    }
+                }
+                for db in [12., 6., 0., -6., -12.] {
+                    let mut b = gpui::PathBuilder::stroke(px(1.));
+                    b.move_to(at(0.0, graph_y(db)));
+                    b.line_to(at(1.0, graph_y(db)));
+                    if let Ok(path) = b.build() {
+                        window.paint_path(path, if db == 0.0 { zero } else { grid });
+                    }
+                }
+                let points: Vec<_> = (0..=140)
+                    .map(|i| {
+                        let f = 20.0 * 1000f32.powf(i as f32 / 140.0);
+                        let db = settings_now.response_db(f, 48_000.0) - preamp;
+                        at(graph_x(f), graph_y(db))
+                    })
+                    .collect();
+                let mut fill = gpui::PathBuilder::fill();
+                fill.move_to(at(0.0, graph_y(0.0)));
+                for p in &points {
+                    fill.line_to(*p);
+                }
+                fill.line_to(at(1.0, graph_y(0.0)));
+                fill.close();
+                if let Ok(path) = fill.build() {
+                    window.paint_path(path, area);
+                }
+                let mut stroke = gpui::PathBuilder::stroke(px(2.5));
+                stroke.move_to(points[0]);
+                for p in &points[1..] {
+                    stroke.line_to(*p);
+                }
+                if let Ok(path) = stroke.build() {
+                    window.paint_path(path, line);
+                }
+            },
+        )
+        .absolute()
+        .top(px(8.))
+        .bottom(px(24.))
+        .left(px(34.))
+        .right(px(8.));
+
+        let freq_labels = [
+            20., 50., 100., 200., 500., 1000., 2000., 5000., 10000., 20000.,
+        ]
+        .into_iter()
+        .map(|f| {
             div()
+                .absolute()
+                .bottom(px(5.))
+                .left(gpui::relative(graph_x(f)))
+                .w(px(30.))
+                .ml(px(-15.))
+                .flex()
+                .justify_center()
+                .text_size(px(10.))
+                .text_color(theme.muted)
+                .child(band_label(f))
+        });
+        let db_labels = [12., 6., 0., -6., -12.].into_iter().map(|db: f32| {
+            div()
+                .absolute()
+                .left(px(-30.))
+                .w(px(24.))
+                .top(gpui::relative(graph_y(db)))
+                .mt(px(-7.))
+                .flex()
+                .justify_end()
+                .text_size(px(10.))
+                .text_color(theme.muted)
+                .child(if db > 0.0 {
+                    format!("+{db}")
+                } else if db < 0.0 {
+                    format!("−{}", -db)
+                } else {
+                    "0".into()
+                })
+        });
+        let nodes = crate::settings::EQ_BANDS
+            .iter()
+            .zip(gains)
+            .enumerate()
+            .filter(|(_, (_, gain))| gain.abs() > 0.01)
+            .map(|(i, (f, _))| {
+                let db = settings_now.response_db(*f, 48_000.0) - preamp;
+                div()
+                    .absolute()
+                    .left(gpui::relative(graph_x(*f)))
+                    .top(gpui::relative(graph_y(db)))
+                    .ml(px(-9.))
+                    .mt(px(-9.))
+                    .size(px(18.))
+                    .rounded_full()
+                    .bg(theme.surface)
+                    .border_2()
+                    .border_color(line)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(9.5))
+                    .font_weight(FontWeight::BOLD)
+                    .child((i + 1).to_string())
+            });
+
+        let entity = cx.entity().downgrade();
+        let eq_drag = self.eq_drag;
+        let bands: Vec<_> = crate::settings::EQ_BANDS
+            .iter()
+            .zip(gains)
+            .enumerate()
+            .map(|(i, (f, gain))| {
+                let fraction = (gain + 12.0) / 24.0;
+                let dragging = eq_drag == Some(i);
+                let this = entity.clone();
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(if gain.abs() > 0.01 {
+                                theme.accent_text
+                            } else {
+                                theme.muted
+                            })
+                            .child(format_db(gain)),
+                    )
+                    .child(vertical_slider(
+                        ("eq-band", i),
+                        dragging,
+                        div().w(px(28.)).h(px(120.)).flex().justify_center().child(
+                            div()
+                                .w(px(4.))
+                                .h_full()
+                                .rounded(px(2.))
+                                .bg(theme.track)
+                                .relative()
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(-1.))
+                                        .w(px(6.))
+                                        .h(px(1.))
+                                        .top(gpui::relative(0.5))
+                                        .bg(theme.muted),
+                                )
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(-6.))
+                                        .size(px(16.))
+                                        .mt(px(-8.))
+                                        .top(gpui::relative(1.0 - fraction))
+                                        .rounded_full()
+                                        .bg(if enabled { accent } else { theme.muted })
+                                        .border_2()
+                                        .border_color(theme.surface),
+                                ),
+                        ),
+                        move |event, _, cx| {
+                            let _ = this.update(cx, |this, cx| this.set_band(i, event, cx));
+                        },
+                    ))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(band_label(*f)),
+                    )
+            })
+            .collect();
+
+        let preset_chip = |name: &'static str, curve: [f32; 10], cx: &mut Context<Self>| {
+            let on = preset == Some(name);
+            div()
+                .id(SharedString::from(format!("eq-preset-{name}")))
+                .h(px(28.))
+                .px(px(11.))
                 .flex()
                 .items_center()
-                .gap(px(10.))
-                .child(title("Equalizzatore"))
-                .child(badge("In arrivo", theme)),
-        )
-        .child(
+                .rounded(px(8.))
+                .text_size(px(12.))
+                .cursor_pointer()
+                .border_1()
+                .when(on, |d| {
+                    d.border_color(theme.accent)
+                        .bg(theme.accent_soft)
+                        .text_color(theme.accent_text)
+                        .font_weight(FontWeight::SEMIBOLD)
+                })
+                .when(!on, |d| {
+                    d.border_color(theme.hairline).hover(|d| d.bg(theme.hover))
+                })
+                .child(name)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.change(cx, |v| {
+                        let profile = v.eq_profile_mut();
+                        profile.gains = curve;
+                        profile.enabled = true;
+                    })
+                }))
+        };
+        let mut presets = div().flex().flex_wrap().items_center().gap(px(6.)).child(
             div()
+                .text_size(px(12.))
                 .text_color(theme.muted)
-                .line_height(px(20.))
-                .child("L'equalizzatore arriva con la versione 0.6: 10 bande per regolarlo in fretta, una vista parametrica per chi vuole precisione e i profili AutoEq per le cuffie più diffuse, con un'impostazione diversa per ogni uscita."),
-        )
-        .into_any_element()
+                .mr(px(4.))
+                .child("Profilo"),
+        );
+        for (name, curve) in EQ_PRESETS {
+            presets = presets.child(preset_chip(name, curve, cx));
+        }
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.))
+                            .child(title("Equalizzatore"))
+                            .child(switch(enabled, theme).id("eq-on").on_click(cx.listener(
+                                |this, _: &ClickEvent, _, cx| {
+                                    this.change(cx, |v| {
+                                        let profile = v.eq_profile_mut();
+                                        profile.enabled = !profile.enabled;
+                                    })
+                                },
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                segments(theme)
+                                    .child(segment("eq-simple", "Semplice", true, theme))
+                                    .child(
+                                        segment("eq-advanced", "Avanzata", false, theme)
+                                            .opacity(0.5)
+                                            .cursor_default(),
+                                    ),
+                            )
+                            .child(
+                                outline_button("eq-ab", "Ascolta senza (A/B)", theme)
+                                    .when(bypass, |d| {
+                                        d.bg(theme.accent_soft)
+                                            .border_color(theme.accent)
+                                            .text_color(theme.accent_text)
+                                    })
+                                    .on_click(|_, _, cx| {
+                                        playback(cx).update(cx, |p, cx| p.toggle_eq_bypass(cx))
+                                    }),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex_1().min_w_0().child(presets))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(12.))
+                            .text_color(theme.muted)
+                            .child(SharedString::from(format!("Salvato per: {device}"))),
+                    ),
+            )
+            .child(
+                div()
+                    .relative()
+                    .h(px(230.))
+                    .rounded(px(10.))
+                    .bg(theme.ground)
+                    .border_1()
+                    .border_color(theme.hairline)
+                    .child(graph)
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(8.))
+                            .bottom(px(24.))
+                            .left(px(34.))
+                            .right(px(8.))
+                            .children(db_labels)
+                            .children(nodes),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .bottom_0()
+                            .h(px(24.))
+                            .left(px(34.))
+                            .right(px(8.))
+                            .children(freq_labels),
+                    ),
+            )
+            .child(
+                div()
+                    .px(px(8.))
+                    .py(px(12.))
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(theme.hairline)
+                    .flex()
+                    .when(!enabled, |d| d.opacity(0.6))
+                    .children(bands),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(4.))
+                            .text_size(px(12.))
+                            .text_color(theme.muted)
+                            .child("Preamp automatico")
+                            .child(
+                                div()
+                                    .text_color(theme.text)
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(format_db(preamp)),
+                            )
+                            .child("· niente clipping"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .opacity(0.55)
+                                    .child(div().text_size(px(12.)).child("Importa profilo AutoEq"))
+                                    .child(badge("In arrivo", theme)),
+                            )
+                            .child(outline_button("eq-reset", "Azzera", theme).on_click(
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.change(cx, |v| v.eq_profile_mut().gains = [0.0; 10])
+                                }),
+                            )),
+                    ),
+            )
+            .into_any_element()
+    }
 }
 
 fn services(theme: &Theme) -> AnyElement {
@@ -1199,7 +1645,7 @@ fn about(theme: &Theme, cx: &mut Context<SettingsPage>) -> AnyElement {
                         .text_color(theme.muted)
                         .text_center()
                         .line_height(px(20.))
-                        .child("Un music player piccolo e leggero, per ascoltare la tua musica come è stata registrata."),
+                        .child("Un music player piccolo e leggero, con audio lossless in alta qualità."),
                 )
                 .child(
                     outline_button("whats-new", "Mostra le novità di questa versione", theme)

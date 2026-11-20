@@ -120,6 +120,24 @@ pub fn pick_config(device: &cpal::Device, rate: u32, channels: u16) -> Result<Ou
     })
 }
 
+/// A configuration for a stream that will play many tracks: exactly `rate` when the device
+/// can, otherwise the device's own default rate (the engine then resamples). At least stereo,
+/// so a mono track followed by a stereo one keeps both channels.
+pub fn pick_lasting_config(
+    device: &cpal::Device,
+    rate: u32,
+    channels: u16,
+) -> Result<OutputConfig> {
+    let wanted = channels.max(2);
+    if let Ok(config) = pick_config(device, rate, wanted) {
+        return Ok(config);
+    }
+    let default = device.default_output_config()?;
+    let fallback = default.sample_rate();
+    pick_config(device, fallback, wanted)
+        .or_else(|_| pick_config(device, fallback, default.channels()))
+}
+
 /// Copies one frame of the track into one frame of the device.
 ///
 /// Matching channels are copied as they are. A mono track is sent to every device channel; any

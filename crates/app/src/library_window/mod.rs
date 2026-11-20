@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 
 use gpui::{
     App, ClickEvent, Context, Entity, FocusHandle, FontWeight, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, ObjectFit, ParentElement, Pixels, Point, Render, ScrollHandle,
-    ScrollWheelEvent, SharedString, StatefulInteractiveElement, Styled, StyledImage,
+    MouseButton, MouseDownEvent, MouseUpEvent, ObjectFit, ParentElement, Pixels, Point, Render,
+    ScrollHandle, ScrollWheelEvent, SharedString, StatefulInteractiveElement, Styled, StyledImage,
     UniformListScrollHandle, Window, div, img, prelude::*, px,
 };
 use lumifi_engine::format_time;
@@ -40,6 +40,14 @@ const SIDEBAR_COMPACT: f32 = 64.0;
 const CONTENT_PAD: f32 = 28.0;
 const PLAYER_BAR_HEIGHT: f32 = 76.0;
 const QUEUE_WIDTH: f32 = 320.0;
+
+/// A section of the search results shown in full.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchMore {
+    Tracks,
+    Artists,
+    Collections,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Page {
@@ -69,6 +77,8 @@ pub struct LibraryWindow {
     library: Entity<Library>,
     settings: Entity<SettingsModel>,
     playlists: Entity<Playlists>,
+    /// The search section opened with "Mostra tutti".
+    search_more: Option<SearchMore>,
     lyrics: Entity<LyricsModel>,
     updates: Entity<Updates>,
     page: Page,
@@ -133,6 +143,7 @@ impl LibraryWindow {
             library,
             settings,
             playlists,
+            search_more: None,
             lyrics,
             updates,
             page: Page::Albums,
@@ -192,6 +203,10 @@ impl LibraryWindow {
     }
 
     fn back(&mut self, cx: &mut Context<Self>) {
+        if self.page == Page::Search && self.search_more.take().is_some() {
+            cx.notify();
+            return;
+        }
         self.page = self.history.pop().unwrap_or(Page::Albums);
         cx.notify();
     }
@@ -218,6 +233,7 @@ impl LibraryWindow {
     ) {
         match event {
             InputEvent::Changed => {
+                self.search_more = None;
                 let empty = input.read(cx).text().trim().is_empty();
                 if empty {
                     if self.page == Page::Search {
@@ -638,6 +654,15 @@ impl LibraryWindow {
     ) -> impl IntoElement {
         let update = self.updates.read(cx).available().map(|r| r.version.clone());
         let maximized = window.is_maximized();
+        // Centred on the window: both sides take the same room, so the field sits in the middle
+        // whatever is on the right.
+        let right_side = if cfg!(target_os = "macos") {
+            200.
+        } else {
+            340.
+        } + if update.is_some() { 112. } else { 0. };
+        let search_width =
+            (f32::from(window.viewport_size().width) - 2.0 * right_side).clamp(180., 420.);
         let stop = |_: &MouseDownEvent, _: &mut Window, cx: &mut App| cx.stop_propagation();
         let window_button = |id: &'static str, icon_name: &'static str, close: bool| {
             let group = SharedString::from(format!("{id}-group"));
@@ -668,8 +693,6 @@ impl LibraryWindow {
             .relative()
             .flex()
             .items_center()
-            .gap(px(12.))
-            .pl(px(if cfg!(target_os = "macos") { 86. } else { 16. }))
             .bg(theme.bar)
             .border_b_1()
             .border_color(theme.hairline)
@@ -686,34 +709,47 @@ impl LibraryWindow {
             ))
             .child(
                 div()
-                    .id("logo")
+                    .flex_1()
+                    .flex_basis(px(0.))
+                    .min_w_0()
                     .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(6.))
-                    .py(px(4.))
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    .hover(|d| d.bg(theme.hover))
-                    .child(logo(22., theme))
+                    // A spacer rather than padding: with padding the flex sides would not
+                    // share the room equally and the search field would sit off centre.
+                    .child(div().flex_none().w(px(if cfg!(target_os = "macos") {
+                        86.
+                    } else {
+                        16.
+                    })))
                     .child(
                         div()
-                            .text_size(px(13.5))
-                            .font_weight(FontWeight::BOLD)
-                            .child("LumiFi"),
-                    )
-                    .on_mouse_down(MouseButton::Left, stop)
-                    .on_click(
-                        cx.listener(|this, _: &ClickEvent, _, cx| this.show_settings(None, cx)),
+                            .id("logo")
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(6.))
+                            .py(px(4.))
+                            .rounded(px(8.))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(theme.hover))
+                            .child(logo(22., theme))
+                            .child(
+                                div()
+                                    .text_size(px(13.5))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child("LumiFi"),
+                            )
+                            .on_mouse_down(MouseButton::Left, stop)
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.show_settings(None, cx)
+                            })),
                     ),
             )
             .child(
-                div().flex_1().flex().justify_center().child(
+                div().flex_none().mx(px(12.)).w(px(search_width)).child(
                     div()
                         .id("search-box")
                         .w_full()
-                        .max_w(px(420.))
                         .h(px(32.))
                         .px(px(12.))
                         .flex()
@@ -723,141 +759,139 @@ impl LibraryWindow {
                         .bg(theme.field)
                         .text_size(px(13.))
                         .child(icon("search", 14., theme.muted))
-                        .child(self.search.clone())
-                        .child(
-                            div()
-                                .flex_none()
-                                .px(px(5.))
-                                .py(px(1.))
-                                .rounded(px(4.))
-                                .border_1()
-                                .border_color(theme.hairline)
-                                .text_size(px(11.))
-                                .text_color(theme.muted)
-                                .child(if cfg!(target_os = "macos") {
-                                    "⌘F"
-                                } else {
-                                    "Ctrl F"
-                                }),
-                        )
+                        .child(div().flex_1().min_w_0().child(self.search.clone()))
                         .on_mouse_down(MouseButton::Left, stop)
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                             this.focus_search(window, cx)
                         })),
                 ),
             )
-            .when_some(update, |d, _version| {
-                d.child(
-                    div()
-                        .id("update-pill")
-                        .relative()
-                        .h(px(30.))
-                        .px(px(12.))
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(6.))
-                        .rounded_full()
-                        .bg(theme.accent)
-                        .text_color(theme.on_accent)
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::BOLD)
-                        .cursor_pointer()
-                        .child(icon("download", 13., theme.on_accent))
-                        .child("Aggiorna")
-                        .child(
+            .child(
+                div()
+                    .flex_1()
+                    .flex_basis(px(0.))
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(12.))
+                    .when_some(update, |d, _version| {
+                        d.child(
                             div()
-                                .absolute()
-                                .top(px(-3.))
-                                .right(px(-3.))
-                                .size(px(10.))
+                                .id("update-pill")
+                                .relative()
+                                .h(px(30.))
+                                .px(px(12.))
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .gap(px(6.))
                                 .rounded_full()
-                                .bg(gpui::rgb(0xffffff))
-                                .border_2()
-                                .border_color(theme.bar),
+                                .bg(theme.accent)
+                                .text_color(theme.on_accent)
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::BOLD)
+                                .cursor_pointer()
+                                .child(icon("download", 13., theme.on_accent))
+                                .child("Aggiorna")
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .top(px(-3.))
+                                        .right(px(-3.))
+                                        .size(px(10.))
+                                        .rounded_full()
+                                        .bg(gpui::rgb(0xffffff))
+                                        .border_2()
+                                        .border_color(theme.bar),
+                                )
+                                .on_mouse_down(MouseButton::Left, stop)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.updates.update(cx, |u, cx| u.set_dialog(true, cx))
+                                })),
                         )
-                        .on_mouse_down(MouseButton::Left, stop)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.updates.update(cx, |u, cx| u.set_dialog(true, cx))
-                        })),
-                )
-            })
-            .child(
-                div()
-                    .id("mini-player-button")
-                    .h(px(30.))
-                    .px(px(10.))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(6.))
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(theme.hairline)
-                    .text_size(px(12.))
-                    .cursor_pointer()
-                    .hover(|d| d.bg(theme.hover))
-                    .child(icon("minimize", 13., theme.text))
-                    .child("Mini player")
-                    .on_mouse_down(MouseButton::Left, stop)
-                    .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleLibrary), cx)),
+                    })
+                    .child(
+                        div()
+                            .id("mini-player-button")
+                            .h(px(30.))
+                            .px(px(10.))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(px(6.))
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(theme.hairline)
+                            .text_size(px(12.))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(theme.hover))
+                            .child(icon("minimize", 13., theme.text))
+                            .child("Mini player")
+                            .on_mouse_down(MouseButton::Left, stop)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(ToggleLibrary), cx)
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("settings-button")
+                            .size(px(36.))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(8.))
+                            .cursor_pointer()
+                            .when(self.page == Page::Settings, |d| d.bg(theme.accent_soft))
+                            .hover(|d| d.bg(theme.hover))
+                            .child(icon(
+                                "settings",
+                                17.,
+                                if self.page == Page::Settings {
+                                    theme.accent_text
+                                } else {
+                                    theme.muted
+                                },
+                            ))
+                            .on_mouse_down(MouseButton::Left, stop)
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                if this.page == Page::Settings {
+                                    this.back(cx)
+                                } else {
+                                    this.show_settings(None, cx)
+                                }
+                            })),
+                    )
+                    // Windows and Linux: our own window buttons (macOS keeps its three dots at left).
+                    .when(!cfg!(target_os = "macos"), |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .flex_none()
+                                .ml(px(4.))
+                                .child(
+                                    window_button("win-min", "win-min", false)
+                                        .on_click(|_, window, _| window.minimize_window()),
+                                )
+                                .child(
+                                    window_button(
+                                        "win-max",
+                                        if maximized { "win-restore" } else { "win-max" },
+                                        false,
+                                    )
+                                    .on_click(|_, window, _| platform::toggle_maximize(window)),
+                                )
+                                .child(
+                                    window_button("win-close", "win-close", true)
+                                        .on_click(|_, window, _| window.remove_window()),
+                                ),
+                        )
+                    })
+                    .when(cfg!(target_os = "macos"), |d| {
+                        d.child(div().flex_none().w(px(16.)))
+                    }),
             )
-            .child(
-                div()
-                    .id("settings-button")
-                    .size(px(36.))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    .when(self.page == Page::Settings, |d| d.bg(theme.accent_soft))
-                    .hover(|d| d.bg(theme.hover))
-                    .child(icon(
-                        "settings",
-                        17.,
-                        if self.page == Page::Settings {
-                            theme.accent_text
-                        } else {
-                            theme.muted
-                        },
-                    ))
-                    .on_mouse_down(MouseButton::Left, stop)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        if this.page == Page::Settings {
-                            this.back(cx)
-                        } else {
-                            this.show_settings(None, cx)
-                        }
-                    })),
-            )
-            // Windows and Linux: our own window buttons (macOS keeps its three dots at left).
-            .when(!cfg!(target_os = "macos"), |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .ml(px(4.))
-                        .child(
-                            window_button("win-min", "win-min", false)
-                                .on_click(|_, window, _| window.minimize_window()),
-                        )
-                        .child(
-                            window_button(
-                                "win-max",
-                                if maximized { "win-restore" } else { "win-max" },
-                                false,
-                            )
-                            .on_click(|_, window, _| platform::toggle_maximize(window)),
-                        )
-                        .child(
-                            window_button("win-close", "win-close", true)
-                                .on_click(|_, window, _| window.remove_window()),
-                        ),
-                )
-            })
-            .when(cfg!(target_os = "macos"), |d| d.pr(px(16.)))
     }
 
     fn render_sidebar(
@@ -984,9 +1018,9 @@ impl LibraryWindow {
                                     name.clone().into(),
                                     Page::Playlist(name.clone()),
                                 )
-                                .on_mouse_down(
+                                .on_mouse_up(
                                     MouseButton::Right,
-                                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    cx.listener(move |this, event: &MouseUpEvent, _, cx| {
                                         this.playlist_menu(menu_name.clone(), event.position, cx)
                                     }),
                                 )
@@ -1099,7 +1133,11 @@ impl LibraryWindow {
             _ => playback.position(),
         };
         let paused = playback.is_paused();
-        let volume = playback.effective_volume();
+        let volume = if playback.is_muted() {
+            0.0
+        } else {
+            playback.volume()
+        };
         let shuffle_color = if playback.is_shuffled() {
             theme.accent_text
         } else {

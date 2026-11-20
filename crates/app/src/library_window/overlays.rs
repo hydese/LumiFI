@@ -312,7 +312,7 @@ impl LibraryWindow {
                         .text_size(px(14.))
                         .line_height(px(21.))
                         .text_color(theme.muted)
-                        .child("La tua musica, come è stata registrata. Quattro scelte veloci e si parte; puoi cambiarle tutte dopo."),
+                        .child("Piccolo, leggero, con audio lossless in alta qualità. Quattro scelte veloci e si parte; puoi cambiarle tutte dopo."),
                 )
                 .into_any_element(),
             1 => {
@@ -502,7 +502,6 @@ impl LibraryWindow {
                 .child(div().text_size(px(12.)).text_color(theme.muted).child("Quando arrivano li trovi in Impostazioni › Servizi."))
                 .into_any_element(),
             _ => {
-                let check = value.check_updates;
                 let mode_card = |id: &'static str, title: &'static str, hint: &'static str, on: bool, soon: bool| {
                     div()
                         .id(id)
@@ -547,24 +546,9 @@ impl LibraryWindow {
                             "w-ask",
                             "Chiedimi prima",
                             "LumiFi ti avvisa di una nuova versione con il pulsante Aggiorna.",
-                            check,
+                            true,
                             false,
-                        )
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.settings.update(cx, |s, cx| s.update(cx, |v| v.check_updates = true))
-                        })),
-                    )
-                    .child(
-                        mode_card(
-                            "w-never",
-                            "Non controllare",
-                            "Nessun controllo all'avvio. Puoi cercare a mano da Impostazioni.",
-                            !check,
-                            false,
-                        )
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.settings.update(cx, |s, cx| s.update(cx, |v| v.check_updates = false))
-                        })),
+                        ),
                     )
                     .child(div().text_size(px(12.)).text_color(theme.muted).child("Puoi cambiarlo in Impostazioni › Generale."))
                     .into_any_element()
