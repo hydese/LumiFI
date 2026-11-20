@@ -5,6 +5,7 @@
 
 mod actions;
 mod assets;
+mod eq_panel;
 mod library;
 mod library_window;
 mod lyrics;
@@ -65,6 +66,7 @@ fn main() {
         playback::queue_opened_paths(paths);
     });
     app.run(move |cx: &mut App| {
+        theme::install_fonts(cx);
         let settings = Settings::load();
         let start_with_mini = settings.start_with == StartWith::Mini;
         let resume = settings.resume;

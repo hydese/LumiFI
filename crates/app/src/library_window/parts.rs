@@ -172,6 +172,8 @@ pub struct TrackRow {
     pub playing: bool,
     /// The heart and the ⋯ button, shown under the mouse.
     pub actions: Option<AnyElement>,
+    /// Picked with Ctrl/⌘+click or Shift+click.
+    pub selected: bool,
 }
 
 /// The heart (always visible on a favourite, otherwise under the mouse) and the ⋯ menu button
@@ -241,7 +243,8 @@ pub fn row_actions(
                     let path = path.clone();
                     let in_playlist = in_playlist.clone();
                     let _ = this.update(cx, |this, cx| {
-                        this.track_menu(vec![path], position, in_playlist, cx)
+                        let paths = this.menu_paths(&path);
+                        this.track_menu(paths, position, in_playlist, cx)
                     });
                 }),
         )
@@ -304,7 +307,8 @@ pub fn track_row(row: TrackRow, compact: bool, theme: &Theme) -> gpui::Stateful<
         .gap(px(14.))
         .rounded(px(6.))
         .cursor_pointer()
-        .hover(|d| d.bg(theme.hover))
+        .when(row.selected, |d| d.bg(theme.accent_soft))
+        .when(!row.selected, |d| d.hover(|d| d.bg(theme.hover)))
         .child(
             div()
                 .w(px(NUMBER_WIDTH))

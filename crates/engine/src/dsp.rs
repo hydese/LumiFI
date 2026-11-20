@@ -12,11 +12,23 @@ pub const EQ_BANDS: [f32; 10] = [
 /// How far a band can go up or down, in decibels.
 pub const EQ_RANGE_DB: f32 = 12.0;
 
-/// What the user set: on or off, and the gain of each band in decibels.
+/// Where the bass boost shelf turns, in hertz.
+pub const BASS_BOOST_HZ: f32 = 105.0;
+/// The most the bass boost can add, in decibels.
+pub const BASS_BOOST_MAX_DB: f32 = 12.0;
+/// The output gain's range, in decibels.
+pub const GAIN_RANGE_DB: (f32, f32) = (-12.0, 6.0);
+
+/// What the user set: on or off, the gain of each band, the bass boost and the output gain,
+/// all in decibels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EqSettings {
     pub enabled: bool,
     pub gains: [f32; 10],
+    /// A low shelf under ~100 Hz; 0 is off.
+    pub bass_boost: f32,
+    /// Added after everything, on top of the automatic preamp.
+    pub gain_db: f32,
 }
 
 impl Default for EqSettings {
@@ -24,6 +36,8 @@ impl Default for EqSettings {
         Self {
             enabled: false,
             gains: [0.0; 10],
+            bass_boost: 0.0,
+            gain_db: 0.0,
         }
     }
 }
@@ -31,26 +45,64 @@ impl Default for EqSettings {
 impl EqSettings {
     /// True when the equalizer would change the sound.
     pub fn is_active(&self) -> bool {
-        self.enabled && self.gains.iter().any(|g| g.abs() > 0.01)
+        self.enabled
+            && (self.gains.iter().any(|g| g.abs() > 0.01)
+                || self.bass_boost > 0.01
+                || self.gain_db.abs() > 0.01)
     }
 
-    /// The automatic preamp: as much as the highest boost, so boosted bands cannot clip.
-    pub fn preamp_db(&self) -> f32 {
-        -self.gains.iter().copied().fold(0.0_f32, f32::max)
-    }
-
-    /// The combined response at `frequency`, in decibels (preamp included), for drawing the
-    /// curve.
-    pub fn response_db(&self, frequency: f32, sample_rate: f32) -> f32 {
-        let mut total = self.preamp_db();
-        for (band, gain) in EQ_BANDS.iter().zip(self.gains) {
-            if gain.abs() < 0.01 || *band >= sample_rate / 2.0 {
-                continue;
-            }
-            let c = Biquad::peaking(*band, gain, EQ_Q, sample_rate);
-            total += c.magnitude_db(frequency, sample_rate);
+    /// The filters for a stream at `sample_rate`.
+    fn filters(&self, sample_rate: f32) -> Vec<Biquad> {
+        let mut filters: Vec<Biquad> = EQ_BANDS
+            .iter()
+            .zip(self.gains)
+            .filter(|(band, gain)| gain.abs() > 0.01 && **band < sample_rate / 2.0)
+            .map(|(band, gain)| Biquad::peaking(*band, gain, EQ_Q, sample_rate))
+            .collect();
+        if self.bass_boost > 0.01 {
+            filters.push(Biquad::low_shelf(
+                BASS_BOOST_HZ,
+                self.bass_boost.min(BASS_BOOST_MAX_DB),
+                sample_rate,
+            ));
         }
-        total
+        filters
+    }
+
+    /// The response of the filters alone at `frequency`, in decibels.
+    pub fn curve_db(&self, frequency: f32, sample_rate: f32) -> f32 {
+        self.filters(sample_rate)
+            .iter()
+            .map(|f| f.magnitude_db(frequency, sample_rate))
+            .sum()
+    }
+
+    /// The automatic preamp: down by the highest point of the curve, so no boost can clip.
+    pub fn preamp_db(&self) -> f32 {
+        let filters = self.filters(48_000.0);
+        if filters.is_empty() {
+            return 0.0;
+        }
+        let peak = (0..=200)
+            .map(|i| {
+                let f = 20.0 * 1000f32.powf(i as f32 / 200.0);
+                filters
+                    .iter()
+                    .map(|c| c.magnitude_db(f, 48_000.0))
+                    .sum::<f32>()
+            })
+            .fold(0.0_f32, f32::max);
+        -peak
+    }
+
+    /// Preamp and output gain together, in decibels.
+    pub fn level_db(&self) -> f32 {
+        self.preamp_db() + self.gain_db
+    }
+
+    /// The combined response at `frequency`, in decibels (preamp and gain included).
+    pub fn response_db(&self, frequency: f32, sample_rate: f32) -> f32 {
+        self.level_db() + self.curve_db(frequency, sample_rate)
     }
 }
 
@@ -83,6 +135,23 @@ impl Biquad {
         }
     }
 
+    /// A low shelf with slope 1 (RBJ cookbook).
+    pub fn low_shelf(frequency: f32, gain_db: f32, sample_rate: f32) -> Self {
+        let a = 10f64.powf(f64::from(gain_db) / 40.0);
+        let w0 = 2.0 * PI * f64::from(frequency) / f64::from(sample_rate);
+        let cos = w0.cos();
+        let alpha = w0.sin() / 2.0 * std::f64::consts::SQRT_2;
+        let sq = 2.0 * a.sqrt() * alpha;
+        let a0 = (a + 1.0) + (a - 1.0) * cos + sq;
+        Self {
+            b0: a * ((a + 1.0) - (a - 1.0) * cos + sq) / a0,
+            b1: 2.0 * a * ((a - 1.0) - (a + 1.0) * cos) / a0,
+            b2: a * ((a + 1.0) - (a - 1.0) * cos - sq) / a0,
+            a1: -2.0 * ((a - 1.0) + (a + 1.0) * cos) / a0,
+            a2: ((a + 1.0) + (a - 1.0) * cos - sq) / a0,
+        }
+    }
+
     fn magnitude_db(&self, frequency: f32, sample_rate: f32) -> f32 {
         let w = 2.0 * PI * f64::from(frequency) / f64::from(sample_rate);
         let (c1, s1, c2, s2) = (w.cos(), w.sin(), (2.0 * w).cos(), (2.0 * w).sin());
@@ -108,14 +177,9 @@ pub struct Equalizer {
 
 impl Equalizer {
     pub fn new(settings: &EqSettings, channels: usize, sample_rate: u32) -> Self {
-        let rate = sample_rate as f32;
-        let filters: Vec<Biquad> = if settings.is_active() {
-            EQ_BANDS
-                .iter()
-                .zip(settings.gains)
-                .filter(|(band, gain)| gain.abs() > 0.01 && **band < rate / 2.0)
-                .map(|(band, gain)| Biquad::peaking(*band, gain, EQ_Q, rate))
-                .collect()
+        let active = settings.is_active();
+        let filters = if active {
+            settings.filters(sample_rate as f32)
         } else {
             Vec::new()
         };
@@ -123,8 +187,8 @@ impl Equalizer {
             channels,
             state: vec![[0.0; 2]; filters.len() * channels],
             filters,
-            preamp: 10f32.powf(settings.preamp_db() / 20.0),
-            active: settings.is_active(),
+            preamp: 10f32.powf(settings.level_db() / 20.0),
+            active,
         }
     }
 
@@ -336,7 +400,7 @@ mod tests {
         assert_eq!(frame, [0.25, -0.5]);
         let flat = EqSettings {
             enabled: true,
-            gains: [0.0; 10],
+            ..EqSettings::default()
         };
         assert!(!Equalizer::new(&flat, 2, 44_100).is_active());
     }
@@ -345,10 +409,10 @@ mod tests {
     fn a_band_boosts_its_frequency_and_the_preamp_prevents_clipping() {
         let mut settings = EqSettings {
             enabled: true,
-            gains: [0.0; 10],
+            ..EqSettings::default()
         };
         settings.gains[5] = 6.0; // 1 kHz
-        assert_eq!(settings.preamp_db(), -6.0);
+        assert!((settings.preamp_db() + 6.0).abs() < 0.05);
         // At the band the boost and the preamp cancel out; far away only the preamp is left.
         assert!(settings.response_db(1_000.0, 48_000.0).abs() < 0.3);
         assert!((settings.response_db(60.0, 48_000.0) + 6.0).abs() < 0.3);
@@ -364,6 +428,29 @@ mod tests {
             (level - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.03,
             "{level}"
         );
+    }
+
+    #[test]
+    fn bass_boost_lifts_the_lows_and_gain_moves_everything() {
+        let settings = EqSettings {
+            enabled: true,
+            bass_boost: 6.0,
+            ..EqSettings::default()
+        };
+        assert!((settings.curve_db(30.0, 48_000.0) - 6.0).abs() < 0.5);
+        assert!(settings.curve_db(2_000.0, 48_000.0).abs() < 0.2);
+        // Normalised: the boosted lows sit at 0 dB, the rest goes down.
+        assert!(settings.response_db(30.0, 48_000.0).abs() < 0.5);
+        let louder = EqSettings {
+            gain_db: 3.0,
+            ..settings
+        };
+        assert!(
+            (louder.response_db(2_000.0, 48_000.0) - settings.response_db(2_000.0, 48_000.0) - 3.0)
+                .abs()
+                < 0.01
+        );
+        assert!(louder.is_active());
     }
 
     #[test]

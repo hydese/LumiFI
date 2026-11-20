@@ -31,11 +31,11 @@ pub enum Dock {
     Bottom,
 }
 
-/// The mini player's sizes, from the right-click menu. The square can go much smaller: at 25%
-/// it is only the cover.
+/// The mini player's sizes, from the right-click menu. The square can go smaller: at 50% it is
+/// only the cover, with a small bar of controls under the mouse.
 pub fn mini_scales(style: MiniStyle) -> &'static [f32] {
     match style {
-        MiniStyle::Square => &[0.25, 0.5, 0.75, 1.0, 1.25, 1.5],
+        MiniStyle::Square => &[0.5, 0.75, 1.0, 1.25, 1.5],
         MiniStyle::Strip => &[0.75, 1.0, 1.25, 1.5],
     }
 }
@@ -75,6 +75,11 @@ impl GainMode {
 pub struct EqProfile {
     pub enabled: bool,
     pub gains: [f32; 10],
+    /// Bass boost in dB; 0 is off.
+    pub bass_boost: f32,
+    /// The boost used when bass boost is switched on again.
+    pub bass_amount: f32,
+    pub gain_db: f32,
 }
 
 impl EqProfile {
@@ -82,8 +87,18 @@ impl EqProfile {
         lumifi_engine::dsp::EqSettings {
             enabled: self.enabled,
             gains: self.gains,
+            bass_boost: self.bass_boost,
+            gain_db: self.gain_db,
         }
     }
+}
+
+/// A preset the user saved.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct EqPreset {
+    pub name: String,
+    pub gains: [f32; 10],
 }
 
 pub use lumifi_engine::dsp::EQ_BANDS;
@@ -147,6 +162,10 @@ pub struct Settings {
     pub replaygain: GainMode,
     /// The equalizer for each output device, by name ("" for the system default).
     pub eq: BTreeMap<String, EqProfile>,
+    /// The user's own equalizer presets.
+    pub eq_presets: Vec<EqPreset>,
+    /// The library window was maximized when it closed.
+    pub library_maximized: bool,
 }
 
 impl Default for Settings {
@@ -168,6 +187,8 @@ impl Default for Settings {
             welcome_done: false,
             replaygain: GainMode::Off,
             eq: BTreeMap::new(),
+            eq_presets: Vec::new(),
+            library_maximized: false,
         }
     }
 }
@@ -313,7 +334,7 @@ mod tests {
     #[test]
     fn sizes_follow_the_style() {
         assert_eq!(fit_scale(MiniStyle::Strip, 0.25), 0.75);
-        assert_eq!(fit_scale(MiniStyle::Square, 0.25), 0.25);
+        assert_eq!(fit_scale(MiniStyle::Square, 0.25), 0.5);
         assert_eq!(fit_scale(MiniStyle::Strip, 2.0), 1.5);
     }
 }

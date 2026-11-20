@@ -202,7 +202,7 @@ impl Render for MiniMenu {
             .border_color(theme.hairline_strong)
             .text_color(theme.text)
             .text_size(px(13.))
-            .font_family(".SystemUIFont")
+            .font_family(crate::theme::ui_font(cx))
             .flex()
             .flex_col()
             .children(list.into_iter().enumerate().map(|(i, entry)| {

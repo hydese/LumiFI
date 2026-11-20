@@ -23,8 +23,9 @@ Un music player piccolo e leggero, con audio lossless in alta qualità.
 - 🪶 **Leggero.** Scritto in Rust, poca memoria e avvio istantaneo.
 - 🟦 **Piccolo quando serve.** Un mini player che sta in un angolo dello schermo, come il
   vecchio Winamp, e si apre in una libreria completa quando vuoi cercare e organizzare.
-- 🎚️ **Equalizzatore vero.** Dieci bande con preamplificazione automatica (niente clipping),
-  salvato per ogni uscita audio; la curva parametrica e i profili AutoEq arrivano dopo.
+- 🎚️ **Equalizzatore vero.** Dieci bande, bass boost e gain, preamplificazione automatica
+  (niente clipping), preset pronti e tuoi, salvato per ogni uscita audio; si apre anche in una
+  finestra sua. La curva parametrica e i profili AutoEq arrivano dopo.
 - 🔌 **Servizi a scelta.** Spotify, Apple Music e gli altri si attivano dalle impostazioni; se
   non li accendi, non li vedi.
 
@@ -56,23 +57,29 @@ cargo run --release -p lumifi -- ~/Music/Album     # parte subito con una cartel
 | ⌘, / Ctrl+, | Impostazioni |
 | ⌘F / Ctrl+F | Cerca brani, artisti, album e playlist (Invio suona il primo, Esc chiude) |
 | ⌘O / Ctrl+O | Apri file o cartelle |
+| ⌘/Ctrl+clic, Maiusc+clic | Seleziona più brani (poi tasto destro: playlist, coda, Preferiti) |
+| ⌘A / Ctrl+A, Esc | Seleziona tutti i brani della pagina / togli la selezione |
 
 LumiFi si apre sulla **libreria**: album, artisti, brani e playlist, con la ricerca in alto e
 la barra di riproduzione in basso. Un clic su un brano lo suona, un altro clic lo mette in
 pausa; il tasto destro (o il pulsante ⋯ sulla riga) su brani e album li aggiunge alla coda o
-a una playlist. Il cuore su ogni riga li mette nei Preferiti. In Brani, **Riproduci** e
-**Casuale** suonano tutta la libreria. In basso a destra si aprono la **coda** e **In riproduzione**, con i
+a una playlist. Il cuore su ogni riga li mette nei Preferiti. In Brani, negli album e nelle
+playlist il ▶ tondo suona tutto e l'icona accanto lo mescola. Lo shuffle è casuale davvero
+(ogni ordine ha la stessa probabilità) e, quando l'album o la playlist finisce, continua con
+brani a caso dalla libreria; la coda mostra i prossimi 50. In basso a destra si aprono la **coda** e **In riproduzione**, con i
 **testi sincronizzati** (da un file .lrc accanto al brano, dai tag, oppure da
 [LRCLIB](https://lrclib.net)).
 
-Il pulsante **Mini player** in alto (o Ctrl+L) la sostituisce con il mini player, a
-**striscia** o **quadrato**. Il mini player si sposta trascinandolo da un punto libero; con il
-**tasto destro** si sceglie la dimensione (striscia 75–150%, quadrato 25–150%: al 25% resta
-solo la copertina, con play al passaggio del mouse), la posizione (libera o agganciata in alto
+Il pulsante **mini player** nella barra in basso (o Ctrl+L) la sostituisce con il mini
+player, a **striscia** o **quadrato**; un clic sulla copertina riporta alla libreria. Il mini
+player si sposta trascinandolo da un punto libero; con il **tasto destro** si sceglie la
+dimensione (striscia 75–150%, quadrato 50–150%: al 50% resta solo la copertina, con i comandi
+al passaggio del mouse), la posizione (libera o agganciata in alto
 o in basso), la forma e "sempre in primo piano". La musica non si ferma quando cambi finestra,
 e all'avvio LumiFi riprende dall'ultimo brano, in pausa.
 
-Un clic sul logo LumiFi (o sull'ingranaggio) apre le **Impostazioni**: Generale, Aspetto,
+Un clic sul logo LumiFi (o sull'ingranaggio) apre le **Impostazioni**, fatte come quelle di
+LumiPDF: Generale, Aspetto,
 Audio (anche la scelta dell'uscita), Libreria, Equalizzatore, Servizi, Informazioni. Quello che
 non c'è ancora è segnato "In arrivo". All'avvio LumiFi controlla se su GitHub c'è una versione
 nuova e, se sì, mostra il pulsante **Aggiorna**. Le playlist sono file .m3u8 nella cartella dei

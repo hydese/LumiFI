@@ -112,15 +112,38 @@ pub fn start_drag(window: &Window) {
     window.start_window_move();
 }
 
+/// Takes a window out of the maximized state, if it is in it (the mini player must never be).
+pub fn unmaximize(window: &mut Window) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{IsZoomed, SW_RESTORE, ShowWindowAsync};
+        if let Some(hwnd) = hwnd(window) {
+            // SAFETY: `hwnd` is this window's live handle.
+            unsafe {
+                if IsZoomed(hwnd) != 0 {
+                    ShowWindowAsync(hwnd, SW_RESTORE);
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    if window.is_maximized() {
+        window.zoom_window();
+    }
+}
+
 /// Maximizes the window, or restores it if it already is (the title bar's middle button and
 /// double-click).
 pub fn toggle_maximize(window: &mut Window) {
     #[cfg(target_os = "windows")]
     {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            IsZoomed, SW_MAXIMIZE, SW_RESTORE, ShowWindow,
+            IsZoomed, SW_MAXIMIZE, SW_RESTORE, ShowWindowAsync,
         };
         if let Some(hwnd) = hwnd(window) {
+            // Asynchronous, as gpui does it: a synchronous ShowWindow resizes the window in the
+            // middle of gpui handling the click, and gpui then misses the new size (the page
+            // stayed small in a corner of the maximized window).
             // SAFETY: `hwnd` is this window's live handle.
             unsafe {
                 let command = if IsZoomed(hwnd) != 0 {
@@ -128,7 +151,7 @@ pub fn toggle_maximize(window: &mut Window) {
                 } else {
                     SW_MAXIMIZE
                 };
-                ShowWindow(hwnd, command);
+                ShowWindowAsync(hwnd, command);
             }
         }
     }
@@ -217,7 +240,7 @@ pub fn work_area(_window: &Window) -> Option<gpui::Bounds<gpui::Pixels>> {
 #[cfg(target_os = "windows")]
 pub fn move_to(window: &Window, origin: gpui::Point<gpui::Pixels>) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+        SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
     };
     let Some(hwnd) = hwnd(window) else {
         return;
@@ -234,7 +257,7 @@ pub fn move_to(window: &Window, origin: gpui::Point<gpui::Pixels>) {
             y,
             0,
             0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
         );
     }
 }

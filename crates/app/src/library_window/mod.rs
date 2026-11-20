@@ -99,6 +99,10 @@ pub struct LibraryWindow {
     menu: Option<Menu>,
     /// A playlist being renamed, with its name field.
     renaming: Option<(String, Entity<TextInput>)>,
+    /// Tracks picked with Ctrl/⌘+click or Shift+click, in the order they were picked.
+    selection: Vec<PathBuf>,
+    /// Where a Shift+click range starts, in the list on screen.
+    select_anchor: Option<usize>,
     /// The welcome's step, while it shows.
     welcome: Option<usize>,
     _subscriptions: Vec<gpui::Subscription>,
@@ -159,6 +163,8 @@ impl LibraryWindow {
             search,
             settings_page,
             queue_open: false,
+            selection: Vec::new(),
+            select_anchor: None,
             menu: None,
             renaming: None,
             welcome,
@@ -187,11 +193,108 @@ impl LibraryWindow {
 
     fn go(&mut self, page: Page, cx: &mut Context<Self>) {
         if page != self.page {
+            self.clear_selection(cx);
             let previous = std::mem::replace(&mut self.page, page);
             if previous != Page::Search {
                 self.history.push(previous);
             }
             cx.notify();
+        }
+    }
+
+    // Selection ------------------------------------------------------------------------------
+
+    /// Ctrl/⌘+click picks or drops one track, Shift+click picks a run of them. Returns true
+    /// when the click was about selecting (and must not play anything).
+    fn select_click(
+        &mut self,
+        list: &[PathBuf],
+        index: usize,
+        modifiers: gpui::Modifiers,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if index >= list.len() {
+            return false;
+        }
+        if modifiers.shift {
+            let anchor = self
+                .select_anchor
+                .filter(|&a| a < list.len())
+                .unwrap_or(index);
+            let (low, high) = (anchor.min(index), anchor.max(index));
+            if !modifiers.secondary() {
+                self.selection.clear();
+            }
+            for path in &list[low..=high] {
+                if !self.selection.contains(path) {
+                    self.selection.push(path.clone());
+                }
+            }
+            cx.notify();
+            return true;
+        }
+        if modifiers.secondary() {
+            let path = &list[index];
+            match self.selection.iter().position(|p| p == path) {
+                Some(at) => {
+                    self.selection.remove(at);
+                }
+                None => self.selection.push(path.clone()),
+            }
+            self.select_anchor = Some(index);
+            cx.notify();
+            return true;
+        }
+        self.select_anchor = Some(index);
+        if !self.selection.is_empty() {
+            self.selection.clear();
+            cx.notify();
+        }
+        false
+    }
+
+    /// The tracks a menu opened on `path` acts on: the whole selection when `path` is in it.
+    fn menu_paths(&self, path: &Path) -> Vec<PathBuf> {
+        if self.selection.len() > 1 && self.selection.iter().any(|p| p == path) {
+            self.selection.clone()
+        } else {
+            vec![path.to_path_buf()]
+        }
+    }
+
+    fn is_selected(&self, path: &Path) -> bool {
+        self.selection.iter().any(|p| p == path)
+    }
+
+    fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        if !self.selection.is_empty() {
+            self.selection.clear();
+            cx.notify();
+        }
+        self.select_anchor = None;
+    }
+
+    /// The tracks listed on the page in view, for Ctrl+A.
+    fn page_tracks(&self, cx: &App) -> Vec<PathBuf> {
+        let data = self.library.read(cx).data();
+        match &self.page {
+            Page::Tracks => data.tracks.iter().map(|t| t.path.clone()).collect(),
+            Page::Album(index) => data.album_paths(*index),
+            Page::Playlist(name) => self
+                .playlists
+                .read(cx)
+                .get(name)
+                .map(|p| p.tracks.clone())
+                .unwrap_or_default(),
+            Page::Search => {
+                let query = self.search.read(cx).text().to_owned();
+                data.search(&query)
+                    .tracks
+                    .iter()
+                    .map(|&i| data.tracks[i].path.clone())
+                    .collect()
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -370,8 +473,13 @@ impl LibraryWindow {
     ) {
         let mut items = Vec::new();
         let p = paths.clone();
+        let first_label: SharedString = if paths.len() > 1 {
+            format!("Riproduci dopo · {} brani", paths.len()).into()
+        } else {
+            "Riproduci dopo".into()
+        };
         items.push(MenuItem::new(
-            "Riproduci dopo",
+            first_label,
             Some("play-next"),
             move |this, _, cx| {
                 let p = p.clone();
@@ -621,7 +729,7 @@ impl Render for LibraryWindow {
             .flex_col()
             .bg(theme.ground)
             .text_color(theme.text)
-            .font_family(".SystemUIFont")
+            .font_family(crate::theme::ui_font(cx))
             .text_size(px(13.))
             .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
                 let paths = paths.paths().to_vec();
@@ -633,6 +741,13 @@ impl Render for LibraryWindow {
                     .id("library-body")
                     .key_context(PLAYER_CONTEXT)
                     .track_focus(&self.body_focus)
+                    .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
+                        this.selection = this.page_tracks(cx);
+                        cx.notify();
+                    }))
+                    .on_action(
+                        cx.listener(|this, _: &ClearSelection, _, cx| this.clear_selection(cx)),
+                    )
                     .flex()
                     .flex_1()
                     .min_h_0()
@@ -687,6 +802,49 @@ impl LibraryWindow {
                 )
                 .on_mouse_down(MouseButton::Left, stop)
         };
+        // In the settings, as in LumiPDF: "← Libreria" on the left and the title in the middle.
+        let in_settings = self.page == Page::Settings;
+        let left_item: gpui::AnyElement = if in_settings {
+            div()
+                .id("settings-back")
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(6.))
+                .h(px(30.))
+                .px(px(10.))
+                .rounded(px(8.))
+                .cursor_pointer()
+                .text_size(px(13.))
+                .hover(|d| d.bg(theme.hover))
+                .child(icon("back", 15., theme.text))
+                .child("Libreria")
+                .on_mouse_down(MouseButton::Left, stop)
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.back(cx)))
+                .into_any_element()
+        } else {
+            div()
+                .id("logo")
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(8.))
+                .px(px(6.))
+                .py(px(4.))
+                .rounded(px(8.))
+                .cursor_pointer()
+                .hover(|d| d.bg(theme.hover))
+                .child(logo(22., theme))
+                .child(
+                    div()
+                        .text_size(px(13.5))
+                        .font_weight(FontWeight::BOLD)
+                        .child("LumiFi"),
+                )
+                .on_mouse_down(MouseButton::Left, stop)
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_settings(None, cx)))
+                .into_any_element()
+        };
         div()
             .h(px(HEADER_HEIGHT))
             .flex_none()
@@ -720,51 +878,43 @@ impl LibraryWindow {
                     } else {
                         16.
                     })))
-                    .child(
-                        div()
-                            .id("logo")
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap(px(8.))
-                            .px(px(6.))
-                            .py(px(4.))
-                            .rounded(px(8.))
-                            .cursor_pointer()
-                            .hover(|d| d.bg(theme.hover))
-                            .child(logo(22., theme))
-                            .child(
-                                div()
-                                    .text_size(px(13.5))
-                                    .font_weight(FontWeight::BOLD)
-                                    .child("LumiFi"),
-                            )
-                            .on_mouse_down(MouseButton::Left, stop)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.show_settings(None, cx)
-                            })),
-                    ),
+                    .child(left_item),
             )
             .child(
-                div().flex_none().mx(px(12.)).w(px(search_width)).child(
-                    div()
-                        .id("search-box")
-                        .w_full()
-                        .h(px(32.))
-                        .px(px(12.))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .rounded(px(8.))
-                        .bg(theme.field)
-                        .text_size(px(13.))
-                        .child(icon("search", 14., theme.muted))
-                        .child(div().flex_1().min_w_0().child(self.search.clone()))
-                        .on_mouse_down(MouseButton::Left, stop)
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.focus_search(window, cx)
-                        })),
-                ),
+                div()
+                    .flex_none()
+                    .mx(px(12.))
+                    .w(px(search_width))
+                    .when(in_settings, |d| {
+                        d.h(px(32.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(14.))
+                            .child("Impostazioni")
+                    })
+                    .when(!in_settings, |d| {
+                        d.child(
+                            div()
+                                .id("search-box")
+                                .w_full()
+                                .h(px(32.))
+                                .px(px(12.))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .rounded(px(8.))
+                                .bg(theme.field)
+                                .text_size(px(13.))
+                                .child(icon("search", 14., theme.muted))
+                                .child(div().flex_1().min_w_0().child(self.search.clone()))
+                                .on_mouse_down(MouseButton::Left, stop)
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.focus_search(window, cx)
+                                })),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -811,28 +961,6 @@ impl LibraryWindow {
                                 })),
                         )
                     })
-                    .child(
-                        div()
-                            .id("mini-player-button")
-                            .h(px(30.))
-                            .px(px(10.))
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap(px(6.))
-                            .rounded(px(8.))
-                            .border_1()
-                            .border_color(theme.hairline)
-                            .text_size(px(12.))
-                            .cursor_pointer()
-                            .hover(|d| d.bg(theme.hover))
-                            .child(icon("minimize", 13., theme.text))
-                            .child("Mini player")
-                            .on_mouse_down(MouseButton::Left, stop)
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(ToggleLibrary), cx)
-                            }),
-                    )
                     .child(
                         div()
                             .id("settings-button")
@@ -882,10 +1010,15 @@ impl LibraryWindow {
                                     )
                                     .on_click(|_, window, _| platform::toggle_maximize(window)),
                                 )
-                                .child(
-                                    window_button("win-close", "win-close", true)
-                                        .on_click(|_, window, _| window.remove_window()),
-                                ),
+                                .child(window_button("win-close", "win-close", true).on_click(
+                                    |_, window, cx| {
+                                        crate::windows::remember_maximized(
+                                            &window.window_bounds(),
+                                            cx,
+                                        );
+                                        window.remove_window()
+                                    },
+                                )),
                         )
                     })
                     .when(cfg!(target_os = "macos"), |d| {
@@ -1183,6 +1316,7 @@ impl LibraryWindow {
                 .child(icon(name, size, color))
                 .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
         };
+        let eq_on = self.settings.read(cx).value.eq_profile().enabled;
         let toggle = |id: &'static str, name: &'static str, on: bool| {
             div()
                 .id(id)
@@ -1408,14 +1542,35 @@ impl LibraryWindow {
                             ),
                     ),
             )
-            // Lyrics, queue and volume.
+            // Mini player, equalizer, lyrics, queue and volume.
             .child(
                 div()
-                    .w(gpui::relative(if compact { 0.24 } else { 0.28 }))
+                    .w(gpui::relative(if compact { 0.26 } else { 0.3 }))
+                    .pr(px(16.))
                     .flex()
                     .items_center()
                     .justify_end()
                     .gap(px(6.))
+                    .child(
+                        div()
+                            .id("bar-mini")
+                            .size(px(36.))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(8.))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(theme.hover))
+                            .child(icon("minimize", 17., theme.text))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(ToggleLibrary), cx)
+                            }),
+                    )
+                    .child(
+                        toggle("bar-eq", "eq", eq_on)
+                            .on_click(|_, _, cx| cx.defer(crate::windows::open_equalizer)),
+                    )
                     .child(toggle("bar-lyrics", "mic", lyrics_on).on_click(cx.listener(
                         |this, _: &ClickEvent, _, cx| {
                             if this.page == Page::NowPlaying {

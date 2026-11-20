@@ -21,6 +21,10 @@ impl LibraryWindow {
         let this = cx.entity().downgrade();
         let theme = *theme;
         let next = count.saturating_sub(at + 1);
+        // The playing track and the next 50; the rest is counted below.
+        const SHOWN_NEXT: usize = 50;
+        let shown = (count.saturating_sub(at)).min(SHOWN_NEXT + 1);
+        let hidden = next.saturating_sub(SHOWN_NEXT);
         div()
             .w(px(QUEUE_WIDTH))
             .h_full()
@@ -84,9 +88,10 @@ impl LibraryWindow {
                         }),
                 )
                 .child(
-                    uniform_list("queue", count, move |range, _, _| {
+                    uniform_list("queue", shown, move |range, _, _| {
                         range
-                            .map(|position| {
+                            .map(|row| {
+                                let position = at + row;
                                 let info = label(&data, &queue[position]);
                                 let current = position == at;
                                 let past = position < at;
@@ -224,6 +229,22 @@ impl LibraryWindow {
                     .track_scroll(self.queue_scroll.clone())
                     .flex_1(),
                 )
+                .when(hidden > 0, |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .px(px(16.))
+                            .py(px(10.))
+                            .border_t_1()
+                            .border_color(theme.hairline)
+                            .text_size(px(12.))
+                            .text_color(theme.muted)
+                            .child(format!(
+                                "… e altri {hidden} {}",
+                                if hidden == 1 { "brano" } else { "brani" }
+                            )),
+                    )
+                })
             })
             .into_any_element()
     }

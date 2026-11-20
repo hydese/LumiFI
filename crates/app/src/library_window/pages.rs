@@ -51,6 +51,7 @@ fn page_header(
                 .min_w_0()
                 .child(
                     div()
+                        .font_family(crate::theme::title_font())
                         .text_size(px(26.))
                         .font_weight(FontWeight::BOLD)
                         .truncate()
@@ -79,31 +80,43 @@ fn back_button(theme: &Theme, cx: &mut Context<LibraryWindow>) -> impl IntoEleme
         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.back(cx)))
 }
 
-fn pill(
-    id: &'static str,
-    icon_name: &'static str,
-    label: &'static str,
-    accent: bool,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
+/// The round ▶ that plays a whole page (Brani, an album, a playlist).
+fn play_round(id: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
-        .h(px(36.))
-        .px(px(18.))
+        .size(px(44.))
+        .flex_none()
         .flex()
         .items_center()
-        .gap(px(8.))
+        .justify_center()
         .rounded_full()
-        .font_weight(FontWeight::SEMIBOLD)
+        .bg(theme.accent)
         .cursor_pointer()
-        .when(accent, |d| d.bg(theme.accent).text_color(theme.on_accent))
-        .when(!accent, |d| d.bg(theme.field).hover(|d| d.bg(theme.hover)))
-        .child(icon(
-            icon_name,
-            14.,
-            if accent { theme.on_accent } else { theme.text },
-        ))
-        .child(label)
+        .hover(|d| d.opacity(0.9))
+        .child(icon("play", 18., theme.on_accent))
+}
+
+/// The shuffle icon next to it.
+fn shuffle_icon(id: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .size(px(36.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(8.))
+        .cursor_pointer()
+        .hover(|d| d.bg(theme.hover))
+        .child(icon("shuffle", 18., theme.text))
+}
+
+/// A random position in a list of `len`, for "Casuale".
+fn random_start(len: usize) -> usize {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_usize(len);
+    (h.finish() as usize) % len.max(1)
 }
 
 impl LibraryWindow {
@@ -325,6 +338,7 @@ impl LibraryWindow {
     ) -> Vec<AnyElement> {
         let data = self.library.read(cx).data();
         let entity = cx.entity().downgrade();
+        let list: std::rc::Rc<Vec<PathBuf>> = std::rc::Rc::new(paths.to_vec());
         paths
             .iter()
             .enumerate()
@@ -361,19 +375,26 @@ impl LibraryWindow {
                         current,
                         playing,
                         actions: Some(actions),
+                        selected: self.is_selected(path),
                     },
                     compact,
                     theme,
                 )
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    let play = play.clone();
-                    this.click_track(&click_path, cx, move |this, cx| play(this, i, cx));
-                }))
+                .on_click({
+                    let list = list.clone();
+                    cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        if this.select_click(&list, i, event.modifiers(), cx) {
+                            return;
+                        }
+                        let play = play.clone();
+                        this.click_track(&click_path, cx, move |this, cx| play(this, i, cx));
+                    })
+                })
                 .on_mouse_up(
                     MouseButton::Right,
                     cx.listener(move |this, event: &MouseUpEvent, _, cx| {
                         this.track_menu(
-                            vec![menu_path.clone()],
+                            this.menu_paths(&menu_path),
                             event.position,
                             in_playlist.clone(),
                             cx,
@@ -466,6 +487,7 @@ impl LibraryWindow {
                                     )
                                     .child(
                                         div()
+                                            .font_family(crate::theme::title_font())
                                             .text_size(px(30.))
                                             .font_weight(FontWeight::BOLD)
                                             .line_clamp(2)
@@ -477,34 +499,28 @@ impl LibraryWindow {
                                             .mt(px(10.))
                                             .flex()
                                             .gap(px(10.))
-                                            .child(
-                                                pill(
-                                                    "album-play",
-                                                    "play",
-                                                    "Riproduci",
-                                                    true,
-                                                    theme,
-                                                )
-                                                .on_click(cx.listener(
-                                                    move |this, _: &ClickEvent, _, cx| {
-                                                        this.play_album(index, 0, false, cx)
-                                                    },
-                                                )),
-                                            )
-                                            .child(
-                                                pill(
-                                                    "album-shuffle",
-                                                    "shuffle",
-                                                    "Casuale",
-                                                    false,
-                                                    theme,
-                                                )
-                                                .on_click(cx.listener(
-                                                    move |this, _: &ClickEvent, _, cx| {
-                                                        this.play_album(index, 0, true, cx)
-                                                    },
-                                                )),
-                                            ),
+                                            .items_center()
+                                            .child(play_round("album-play", theme).on_click(
+                                                cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                                    this.play_album(index, 0, false, cx)
+                                                }),
+                                            ))
+                                            .child(shuffle_icon("album-shuffle", theme).on_click(
+                                                cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                                    let len = this
+                                                        .library
+                                                        .read(cx)
+                                                        .data()
+                                                        .album_paths(index)
+                                                        .len();
+                                                    this.play_album(
+                                                        index,
+                                                        random_start(len),
+                                                        true,
+                                                        cx,
+                                                    )
+                                                }),
+                                            )),
                                     ),
                             ),
                     ),
@@ -612,52 +628,49 @@ impl LibraryWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let data = self.library.read(cx).data();
-        let header = page_header(
-            "Brani",
-            Some(thousands(data.tracks.len())),
-            false,
-            theme,
-            cx,
-        );
         let all_paths = |this: &mut Self, cx: &mut Context<Self>| -> Vec<std::path::PathBuf> {
             let data = this.library.read(cx).data();
             data.tracks.iter().map(|t| t.path.clone()).collect()
         };
+        let has_tracks = !data.tracks.is_empty();
+        // As drawn by Leo: ▶ before the title, shuffle after the count.
         let header = div()
+            .flex_none()
+            .px(px(CONTENT_PAD))
+            .pt(px(22.))
+            .pb(px(16.))
             .flex()
             .items_center()
-            .justify_between()
-            .pr(px(CONTENT_PAD))
-            .child(header)
-            .when(!data.tracks.is_empty(), |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .gap(px(10.))
-                        .child(
-                            pill("tracks-play", "play", "Riproduci", true, theme).on_click(
-                                cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                    let paths = all_paths(this, cx);
-                                    this.play_paths(paths, 0, false, cx)
-                                }),
-                            ),
-                        )
-                        .child(
-                            pill("tracks-shuffle", "shuffle", "Casuale", false, theme).on_click(
-                                cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                    let paths = all_paths(this, cx);
-                                    // A different first track each time.
-                                    let start = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.subsec_nanos() as usize)
-                                        .unwrap_or(0)
-                                        % paths.len().max(1);
-                                    this.play_paths(paths, start, true, cx)
-                                }),
-                            ),
-                        ),
-                )
+            .gap(px(14.))
+            .when(has_tracks, |d| {
+                d.child(play_round("tracks-play", theme).on_click(cx.listener(
+                    move |this, _: &ClickEvent, _, cx| {
+                        let paths = all_paths(this, cx);
+                        this.play_paths(paths, 0, false, cx)
+                    },
+                )))
+            })
+            .child(
+                div()
+                    .font_family(crate::theme::title_font())
+                    .text_size(px(26.))
+                    .font_weight(FontWeight::BOLD)
+                    .child("Brani"),
+            )
+            .child(
+                div()
+                    .mt(px(6.))
+                    .text_color(theme.muted)
+                    .child(thousands(data.tracks.len())),
+            )
+            .when(has_tracks, |d| {
+                d.child(shuffle_icon("tracks-shuffle", theme).on_click(cx.listener(
+                    move |this, _: &ClickEvent, _, cx| {
+                        let paths = all_paths(this, cx);
+                        let start = random_start(paths.len());
+                        this.play_paths(paths, start, true, cx)
+                    },
+                )))
             });
         if data.tracks.is_empty() {
             return div()
@@ -680,6 +693,8 @@ impl LibraryWindow {
             .get(crate::playlists::FAVORITES)
             .map(|p| p.tracks.iter().cloned().collect())
             .unwrap_or_default();
+        let selected: std::collections::HashSet<std::path::PathBuf> =
+            self.selection.iter().cloned().collect();
         div()
             .flex_1()
             .min_h_0()
@@ -724,12 +739,30 @@ impl LibraryWindow {
                                         current,
                                         playing: current && playing,
                                         actions: Some(actions),
+                                        selected: selected.contains(&track.path),
                                     },
                                     compact,
                                     &theme,
                                 )
-                                .on_click(move |_, _, cx| {
+                                .on_click(move |event, _, cx| {
+                                    let modifiers = event.modifiers();
                                     let _ = this.update(cx, |this, cx| {
+                                        if modifiers.shift || modifiers.secondary() {
+                                            let list: Vec<std::path::PathBuf> = this
+                                                .library
+                                                .read(cx)
+                                                .data()
+                                                .tracks
+                                                .iter()
+                                                .map(|t| t.path.clone())
+                                                .collect();
+                                            this.select_click(&list, i, modifiers, cx);
+                                            return;
+                                        }
+                                        this.select_anchor = Some(i);
+                                        if !this.selection.is_empty() {
+                                            this.selection.clear();
+                                        }
                                         this.click_track(&path, cx, |this, cx| {
                                             let data = this.library.read(cx).data();
                                             let paths = data
@@ -747,7 +780,8 @@ impl LibraryWindow {
                                         let position = event.position;
                                         let p = menu_path.clone();
                                         let _ = menu.update(cx, |this, cx| {
-                                            this.track_menu(vec![p], position, None, cx)
+                                            let paths = this.menu_paths(&p);
+                                            this.track_menu(paths, position, None, cx)
                                         });
                                     },
                                 ),
@@ -856,6 +890,7 @@ impl LibraryWindow {
                                 None => d.child(
                                     div()
                                         .id("playlist-title")
+                                        .font_family(crate::theme::title_font())
                                         .text_size(px(30.))
                                         .font_weight(FontWeight::BOLD)
                                         .truncate()
@@ -880,8 +915,9 @@ impl LibraryWindow {
                                         .mt(px(10.))
                                         .flex()
                                         .gap(px(10.))
+                                        .items_center()
                                         .child(
-                                            pill("playlist-play", "play", "Riproduci", true, theme)
+                                            play_round("playlist-play", theme)
                                                 .on_click(cx.listener(
                                                     move |this, _: &ClickEvent, _, cx| {
                                                         this.play_paths(play_paths.clone(), 0, false, cx)
@@ -889,18 +925,13 @@ impl LibraryWindow {
                                                 )),
                                         )
                                         .child(
-                                            pill(
-                                                "playlist-shuffle",
-                                                "shuffle",
-                                                "Casuale",
-                                                false,
-                                                theme,
-                                            )
+                                            shuffle_icon("playlist-shuffle", theme)
                                             .on_click(cx.listener(
                                                 move |this, _: &ClickEvent, _, cx| {
+                                                    let start = random_start(shuffle_paths.len());
                                                     this.play_paths(
                                                         shuffle_paths.clone(),
-                                                        0,
+                                                        start,
                                                         true,
                                                         cx,
                                                     )

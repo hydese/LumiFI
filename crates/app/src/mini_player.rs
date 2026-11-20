@@ -35,7 +35,7 @@ pub fn base_size(style: MiniStyle) -> (f32, f32) {
 
 pub fn window_size(style: MiniStyle, scale: f32) -> Size<Pixels> {
     let (w, h) = base_size(style);
-    let scale = scale.clamp(0.25, 3.0);
+    let scale = scale.clamp(0.5, 3.0);
     size(px((w * scale).round()), px((h * scale).round()))
 }
 
@@ -112,9 +112,15 @@ impl MiniPlayer {
                 cx.notify();
             }),
             cx.observe_window_bounds(window, |this, window, cx| {
+                this.keep_size(window, cx);
                 this.leave_dock_if_moved(window, cx)
             }),
         ];
+        // Never maximized, never another size than the one chosen (Windows can hand over the
+        // maximized state of the library window it replaces).
+        cx.defer_in(window, |this: &mut Self, window, cx| {
+            this.keep_size(window, cx)
+        });
         let paused = playback.read(cx).is_paused();
         if value.mini_dock != Dock::Free {
             cx.defer_in(window, |this: &mut Self, window, cx| this.place(window, cx));
@@ -152,6 +158,21 @@ impl MiniPlayer {
             });
         } else if redocked {
             cx.defer_in(window, |this, window, cx| this.place(window, cx));
+        }
+    }
+
+    /// Puts the window back to its size if something maximized or stretched it.
+    fn keep_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = window_size(self.style, self.scale);
+        let now = window.bounds().size;
+        let off = (f32::from(now.width) - f32::from(target.width)).abs() > 1.0
+            || (f32::from(now.height) - f32::from(target.height)).abs() > 1.0;
+        if window.is_maximized() || off {
+            platform::unmaximize(window);
+            cx.defer_in(window, move |this, window, cx| {
+                window.resize(target);
+                this.place(window, cx);
+            });
         }
     }
 
@@ -273,7 +294,7 @@ impl Render for MiniPlayer {
             self.epoch += 1;
         }
         let content = match self.style {
-            MiniStyle::Strip => self.render_strip(&theme, cx),
+            MiniStyle::Strip => self.render_strip(&theme, window, cx),
             MiniStyle::Square if self.is_tiny() => self.render_tiny(&theme, cx),
             MiniStyle::Square => self.render_square(&theme, cx),
         };
@@ -297,7 +318,7 @@ impl Render for MiniPlayer {
                 MiniStyle::Square => theme.ground,
             })
             .text_color(theme.text)
-            .font_family(".SystemUIFont")
+            .font_family(crate::theme::ui_font(cx))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| this.set_hovered(*hovered, cx)))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
                 let dy = f32::from(event.delta.pixel_delta(window.line_height()).y);
@@ -497,140 +518,311 @@ impl MiniPlayer {
 
     // The strip -------------------------------------------------------------------------------
 
-    fn render_strip(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_strip(
+        &self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // The approved layout (20/11), in design points on a 480 × 72 strip: two lines run
+        // across the middle and the right — title and controls, then progress and volume.
         let (title, artist) = self.titles(cx);
+        let playback = self.playback.read(cx);
+        let paused = playback.is_paused();
+        let volume = if playback.is_muted() {
+            0.0
+        } else {
+            playback.volume()
+        };
+        let progress = match self.drag {
+            Drag::Seek(at) => at,
+            _ => self.progress(cx),
+        };
+        let hovered = self.hovered;
+        let at = |left: f32, top: f32| div().absolute().left(u(left)).top(u(top));
+
+        // The title scrolls when it does not fit: a pause, a slow glide to the end, a pause.
+        let line = format!("{title} · {artist}");
+        let font_size = px(13.0 * self.scale);
+        let ui = gpui::font(crate::theme::text_font());
+        let runs = [
+            gpui::TextRun {
+                len: title.len(),
+                font: gpui::Font {
+                    weight: FontWeight::SEMIBOLD,
+                    ..ui.clone()
+                },
+                color: theme.text.into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            },
+            gpui::TextRun {
+                len: line.len() - title.len(),
+                font: ui,
+                color: theme.muted.into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            },
+        ];
+        let text_width = f32::from(
+            window
+                .text_system()
+                .shape_line(line.clone().into(), font_size, &runs, None)
+                .width,
+        );
+        let room = 264.0 * self.scale;
+        let overflow = (text_width - room).max(0.0);
+        let text = div()
+            .flex()
+            .whitespace_nowrap()
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(title.clone()))
+            .child(
+                div()
+                    .text_color(theme.muted)
+                    .child(SharedString::from(format!(" · {artist}"))),
+            );
+        let title_view = if overflow > 0.5 {
+            let seconds = 4.0 + overflow / (28.0 * self.scale);
+            text.relative()
+                .with_animation(
+                    SharedString::from(format!("marquee-{line}")),
+                    Animation::new(Duration::from_secs_f32(seconds)).repeat(),
+                    move |el, t| {
+                        let glide = ((t - 0.15) / 0.7).clamp(0.0, 1.0);
+                        let eased = glide * glide * (3.0 - 2.0 * glide);
+                        el.left(px(-overflow * eased))
+                    },
+                )
+                .into_any_element()
+        } else {
+            text.into_any_element()
+        };
+
+        let this = cx.entity().downgrade();
+        let seek = slider(
+            "progress",
+            matches!(self.drag, Drag::Seek(_)),
+            div().h(u(16.)).flex().items_center().child(
+                div()
+                    .w_full()
+                    .h(u(4.))
+                    .rounded(u(2.))
+                    .bg(theme.track)
+                    .relative()
+                    .child(
+                        div()
+                            .h_full()
+                            .w(gpui::relative(progress))
+                            .rounded(u(2.))
+                            .bg(theme.accent),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(u(-3.))
+                            .left(gpui::relative(progress))
+                            .ml(u(-5.))
+                            .size(u(10.))
+                            .rounded_full()
+                            .bg(theme.accent),
+                    ),
+            ),
+            move |event, _, cx| {
+                let _ = this.update(cx, |this, cx| this.slide_seek(event, cx));
+            },
+        );
+        let this = cx.entity().downgrade();
+        let volume_slider = slider(
+            "volume",
+            self.drag == Drag::Volume,
+            div().h(u(14.)).flex().items_center().child(
+                div()
+                    .w_full()
+                    .h(u(3.))
+                    .rounded(u(2.))
+                    .bg(theme.track)
+                    .child(
+                        div()
+                            .h_full()
+                            .w(gpui::relative(volume))
+                            .rounded(u(2.))
+                            .bg(theme.text),
+                    ),
+            ),
+            move |event, _, cx| {
+                let _ = this.update(cx, |this, cx| this.slide_volume(event, cx));
+            },
+        );
+
+        // Library and settings: barely there, and only with the mouse over the strip.
+        let corner = |id: &'static str, name: &'static str, action: Box<dyn gpui::Action>| {
+            div()
+                .id(id)
+                .size(u(18.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(u(4.))
+                .cursor_pointer()
+                .opacity(0.45)
+                .hover(|d| d.opacity(1.).bg(theme.hover))
+                .child(icon(name, 11., theme.text))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
+        };
+
+        let cover_group = SharedString::from("strip-cover");
         div()
             .absolute()
             .inset_0()
-            .flex()
-            .items_center()
             .when(cfg!(target_os = "macos"), |d| {
-                d.border_1().border_color(theme.hairline).rounded(u(14.))
+                d.border_1().border_color(theme.hairline).rounded(u(12.))
             })
+            // The cover: under the mouse it darkens and shows the way back to the library.
             .child(
-                div()
-                    .h_full()
-                    .w(u(70.))
-                    .flex_none()
+                at(0., 0.)
+                    .id("strip-cover")
+                    .group(cover_group.clone())
+                    .size(u(72.))
                     .overflow_hidden()
-                    .child(self.cover(theme, cx)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .pl(u(12.))
-                    .pr(u(10.))
-                    .flex()
-                    .flex_col()
-                    .gap(u(3.))
+                    .cursor_pointer()
+                    .child(self.cover(theme, cx))
                     .child(
                         div()
+                            .absolute()
+                            .inset_0()
                             .flex()
-                            .items_baseline()
-                            .gap(u(6.))
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .max_w(gpui::relative(0.7))
-                                    .text_size(u(12.5))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .truncate()
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .text_size(u(11.))
-                                    .text_color(theme.muted)
-                                    .truncate()
-                                    .child(artist),
-                            ),
+                            .items_center()
+                            .justify_center()
+                            .bg(gpui::rgba(0x00000080))
+                            .opacity(0.)
+                            .group_hover(cover_group, |s| s.opacity(1.))
+                            .child(icon("expand", 20., gpui::rgb(0xffffff))),
                     )
-                    .child(self.progress_view(22., theme, cx)),
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleLibrary), cx)),
             )
+            .when(hovered, |d| {
+                d.child(
+                    at(84., 3.)
+                        .flex()
+                        .child(corner("strip-library", "expand", Box::new(ToggleLibrary)))
+                        .child(corner("strip-settings", "settings", Box::new(OpenSettings))),
+                )
+            })
             .child(
-                div()
+                at(88., 22.)
+                    .w(u(264.))
+                    .h(u(18.))
+                    .overflow_hidden()
+                    .text_size(u(13.))
+                    .line_height(u(18.))
+                    .child(title_view),
+            )
+            .child(at(88., 44.).w(u(264.)).child(seek))
+            .child(
+                at(368., 15.)
+                    .w(u(96.))
+                    .h(u(26.))
                     .flex()
-                    .flex_none()
                     .items_center()
-                    .gap(u(2.))
-                    .pr(u(8.))
+                    .justify_between()
                     .child(button(
                         "previous",
-                        30.,
-                        44.,
+                        24.,
+                        26.,
                         icon("previous", 16., theme.text),
                         Previous,
                     ))
-                    .child(self.play_button(36., 15., theme, cx))
+                    .child(
+                        button(
+                            "play",
+                            26.,
+                            26.,
+                            icon(if paused { "play" } else { "pause" }, 13., theme.on_accent),
+                            TogglePlay,
+                        )
+                        .rounded_full()
+                        .bg(theme.accent),
+                    )
                     .child(button(
                         "next",
-                        30.,
-                        44.,
+                        24.,
+                        26.,
                         icon("next", 16., theme.text),
                         Next,
-                    ))
-                    .child(div().w(u(1.)).h(u(24.)).mx(u(6.)).bg(theme.hairline))
-                    .child(self.mute_button(14., theme, cx))
-                    .child(
-                        div()
-                            .w(u(50.))
-                            .mr(u(4.))
-                            .ml(u(2.))
-                            .child(self.volume_slider(theme, cx)),
-                    )
-                    .child(self.pin_button(theme, theme.muted, cx))
-                    .child(button(
-                        "settings",
-                        26.,
-                        44.,
-                        icon("settings", 14., theme.muted),
-                        OpenSettings,
-                    ))
-                    .child(button(
-                        "library",
-                        28.,
-                        44.,
-                        icon("expand", 14., theme.muted),
-                        ToggleLibrary,
                     )),
             )
+            .child(at(376., 45.).w(u(80.)).child(volume_slider))
             .into_any_element()
     }
 
-    // The smallest square: only the cover, and play on hover ----------------------------------
+    // The smallest square (50%): only the cover; controls in a small bar under the mouse ------
 
     fn is_tiny(&self) -> bool {
-        self.style == MiniStyle::Square && self.scale < 0.3
+        self.style == MiniStyle::Square && self.scale < 0.6
     }
 
     fn render_tiny(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let paused = self.playback.read(cx).is_paused();
+        let white = gpui::rgb(0xffffff);
         div()
             .absolute()
             .inset_0()
-            .child(div().absolute().inset_0().child(self.cover(theme, cx)))
+            // A click on the cover goes back to the library; dragging elsewhere moves the window.
+            .child(
+                div()
+                    .id("tiny-cover")
+                    .absolute()
+                    .inset_0()
+                    .cursor_pointer()
+                    .child(self.cover(theme, cx))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleLibrary), cx)),
+            )
             .when(self.hovered, |d| {
                 d.child(
                     div()
                         .absolute()
-                        .inset_0()
+                        .left_0()
+                        .right_0()
+                        .bottom(u(16.))
                         .flex()
-                        .items_center()
                         .justify_center()
-                        .bg(gpui::rgba(0x0000004d))
                         .child(
-                            button(
-                                "play",
-                                112.,
-                                112.,
-                                icon(if paused { "play" } else { "pause" }, 56., theme.on_accent),
-                                TogglePlay,
-                            )
-                            .rounded_full()
-                            .bg(theme.accent),
+                            div()
+                                .h(u(64.))
+                                .px(u(10.))
+                                .flex()
+                                .items_center()
+                                .gap(u(6.))
+                                .rounded_full()
+                                .bg(gpui::rgba(0x0b0b0cd9))
+                                .child(button(
+                                    "previous",
+                                    48.,
+                                    56.,
+                                    icon("previous", 28., white),
+                                    Previous,
+                                ))
+                                .child(
+                                    button(
+                                        "play",
+                                        52.,
+                                        52.,
+                                        icon(
+                                            if paused { "play" } else { "pause" },
+                                            24.,
+                                            theme.on_accent,
+                                        ),
+                                        TogglePlay,
+                                    )
+                                    .rounded_full()
+                                    .bg(theme.accent),
+                                )
+                                .child(button("next", 48., 56., icon("next", 28., white), Next)),
                         ),
                 )
             })
@@ -859,9 +1051,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_smallest_square_is_only_the_cover() {
-        let size = window_size(MiniStyle::Square, 0.25);
-        assert_eq!((size.width, size.height), (px(70.), px(70.)));
+    fn the_smallest_square_is_half_size() {
+        let size = window_size(MiniStyle::Square, 0.5);
+        assert_eq!((size.width, size.height), (px(140.), px(140.)));
     }
 
     #[test]

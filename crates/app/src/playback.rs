@@ -99,7 +99,7 @@ impl Playback {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0x9E37_79B9);
         Self {
-            queue: Queue::new(seed),
+            queue: Queue::new(seed ^ crate::queue::Rng::from_entropy().next_u64()),
             engine: Engine::new(),
             loaded: false,
             gapless_next: None,
@@ -285,6 +285,45 @@ impl Playback {
         }
     }
 
+    /// With shuffle on, the music goes on after the album or playlist: when it is about to end,
+    /// 50 tracks drawn at random from the library (ones not already in the queue) join it.
+    fn top_up(&mut self, cx: &mut Context<Self>) {
+        if !self.queue.is_shuffled()
+            || self.queue.repeat != Repeat::Off
+            || self.queue.is_empty()
+            || self.queue.remaining() > 1
+        {
+            return;
+        }
+        let Some(library) = cx
+            .try_global::<crate::library::GlobalLibrary>()
+            .map(|l| l.0.clone())
+        else {
+            return;
+        };
+        let data = library.read(cx).data();
+        let mut pool: Vec<&PathBuf> = data
+            .tracks
+            .iter()
+            .map(|t| &t.path)
+            .filter(|p| !self.queue.contains(p))
+            .collect();
+        if pool.is_empty() {
+            return;
+        }
+        let mut rng = crate::queue::Rng::from_entropy();
+        let take = pool.len().min(50);
+        for i in 0..take {
+            let j = i + rng.below(pool.len() - i);
+            pool.swap(i, j);
+        }
+        let added: Vec<PathBuf> = pool[..take].iter().map(|p| (*p).clone()).collect();
+        self.queue.extend(added);
+        self.queue_gapless();
+        self.save_session();
+        cx.notify();
+    }
+
     fn tick(&mut self, cx: &mut Context<Self>) {
         let opened = OPENED
             .lock()
@@ -296,6 +335,7 @@ impl Playback {
         if !self.loaded {
             return;
         }
+        self.top_up(cx);
         // The engine went on to the next track by itself: follow it.
         let index = self.engine.track_index();
         if index > self.heard_index

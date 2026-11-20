@@ -24,6 +24,8 @@ actions!(
         ToggleLibrary,
         OpenSettings,
         FocusSearch,
+        SelectAll,
+        ClearSelection,
         Quit,
     ]
 );
@@ -46,6 +48,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("s", ToggleShuffle, ctx),
         KeyBinding::new("r", CycleRepeat, ctx),
         KeyBinding::new("t", ToggleOnTop, ctx),
+        KeyBinding::new("secondary-a", SelectAll, ctx),
+        KeyBinding::new("escape", ClearSelection, ctx),
         KeyBinding::new("secondary-,", OpenSettings, None),
         KeyBinding::new("secondary-f", FocusSearch, None),
         KeyBinding::new("secondary-l", ToggleLibrary, None),

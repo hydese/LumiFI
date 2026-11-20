@@ -86,7 +86,75 @@ pub struct Queue {
     position: usize,
     pub repeat: Repeat,
     shuffle: bool,
-    seed: u64,
+    rng: Rng,
+}
+
+/// xoshiro256**: a small, fast generator with no visible patterns, seeded from the operating
+/// system's randomness. Every order of the tracks is equally likely (Fisher–Yates with unbiased
+/// draws): a real shuffle, not one that spreads artists out on purpose.
+#[derive(Debug, Clone)]
+pub struct Rng([u64; 4]);
+
+impl Default for Rng {
+    fn default() -> Self {
+        Self::from_entropy()
+    }
+}
+
+impl Rng {
+    pub fn from_seed(seed: u64) -> Self {
+        // splitmix64 spreads one number over the four words.
+        let mut x = seed;
+        let mut next = || {
+            x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = x;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        Self([next(), next(), next(), next()])
+    }
+
+    /// Seeded from the system: the hasher keys Rust draws from the OS, plus the clock.
+    pub fn from_entropy() -> Self {
+        use std::hash::{BuildHasher, Hasher};
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        Self::from_seed(h.finish())
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        let s = &mut self.0;
+        let result = s[1].wrapping_mul(5).rotate_left(7).wrapping_mul(9);
+        let t = s[1] << 17;
+        s[2] ^= s[0];
+        s[3] ^= s[1];
+        s[1] ^= s[2];
+        s[0] ^= s[3];
+        s[2] ^= t;
+        s[3] = s[3].rotate_left(45);
+        result
+    }
+
+    /// A number in `0..n`, without the bias of a plain modulo.
+    pub fn below(&mut self, n: usize) -> usize {
+        let n = n as u64;
+        if n <= 1 {
+            return 0;
+        }
+        let zone = u64::MAX - (u64::MAX % n);
+        loop {
+            let x = self.next_u64();
+            if x < zone {
+                return (x % n) as usize;
+            }
+        }
+    }
 }
 
 /// The queue as saved between launches.
@@ -130,7 +198,7 @@ impl Queue {
 
     pub fn new(seed: u64) -> Self {
         Self {
-            seed: seed | 1,
+            rng: Rng::from_seed(seed),
             ..Default::default()
         }
     }
@@ -298,10 +366,10 @@ impl Queue {
         if self.position + 1 < self.order.len() {
             self.position += 1;
         } else if self.repeat != Repeat::Off {
-            self.position = 0;
             if self.shuffle {
-                self.shuffle_after(0);
+                self.reshuffle_round();
             }
+            self.position = 0;
         } else {
             return None;
         }
@@ -322,14 +390,53 @@ impl Queue {
     }
 
     /// Shuffles everything after `keep` (Fisher–Yates with a small xorshift generator).
+    /// A new round of Repeat All with shuffle: a fresh order whose first tracks were not among
+    /// the last ones heard, so nothing plays twice in a row across the wrap.
+    fn reshuffle_round(&mut self) {
+        let n = self.order.len();
+        if n < 2 {
+            return;
+        }
+        let recent_len = (n / 3).clamp(1, 10);
+        let recent: Vec<usize> = self.order[n - recent_len..].to_vec();
+        let rest = &mut self.order[..];
+        for i in (1..n).rev() {
+            let j = self.rng.below(i + 1);
+            rest.swap(i, j);
+        }
+        // Push recently heard tracks out of the opening positions.
+        for i in 0..recent_len.min(n) {
+            if recent.contains(&self.order[i])
+                && let Some(j) = (recent_len..n).find(|&j| !recent.contains(&self.order[j]))
+            {
+                self.order.swap(i, j);
+            }
+        }
+    }
+
+    /// Adds `tracks` at the end, for the music that goes on after the queue (shuffle keeps going
+    /// with random tracks from the library).
+    pub fn extend(&mut self, tracks: Vec<PathBuf>) {
+        for track in tracks {
+            self.order.push(self.tracks.len());
+            self.tracks.push(track);
+        }
+    }
+
+    /// How many tracks come after the current one.
+    pub fn remaining(&self) -> usize {
+        self.order.len().saturating_sub(self.position + 1)
+    }
+
+    pub fn contains(&self, path: &Path) -> bool {
+        self.tracks.iter().any(|t| t == path)
+    }
+
     fn shuffle_after(&mut self, keep: usize) {
         let start = (keep + 1).min(self.order.len());
         let rest = &mut self.order[start..];
         for i in (1..rest.len()).rev() {
-            self.seed ^= self.seed << 13;
-            self.seed ^= self.seed >> 7;
-            self.seed ^= self.seed << 17;
-            let j = (self.seed % (i as u64 + 1)) as usize;
+            let j = self.rng.below(i + 1);
             rest.swap(i, j);
         }
     }
@@ -338,6 +445,39 @@ impl Queue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shuffles_are_uniform() {
+        // Three tracks after the first: each of the 6 orders should come up about equally.
+        let mut counts = std::collections::HashMap::new();
+        let mut q = Queue::new(11);
+        q.set_shuffle(true);
+        for _ in 0..12_000 {
+            q.replace_at(tracks(4), 0);
+            let (order, _) = q.upcoming();
+            let key: Vec<String> = order.iter().map(|p| p.display().to_string()).collect();
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        assert_eq!(counts.len(), 6);
+        for count in counts.values() {
+            assert!((1_700..2_300).contains(count), "{count}");
+        }
+    }
+
+    #[test]
+    fn a_new_round_does_not_open_with_what_just_played() {
+        let mut q = Queue::new(3);
+        q.set_shuffle(true);
+        q.repeat = Repeat::All;
+        q.replace_at(tracks(30), 0);
+        for _ in 0..5 {
+            let (before, _) = q.upcoming();
+            let last: Vec<PathBuf> = before[20..].iter().map(|p| p.to_path_buf()).collect();
+            q.jump_to(29);
+            let first = q.skip_forward().unwrap().to_path_buf();
+            assert!(!last.contains(&first));
+        }
+    }
 
     fn tracks(n: usize) -> Vec<PathBuf> {
         (0..n)
